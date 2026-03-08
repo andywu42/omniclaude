@@ -606,6 +606,92 @@ Task(
 )
 ```
 
+## Skill Result Input Contract
+
+**Input contract:** All sub-skill result files conform to `ModelSkillResult` from `omnibase_core.models.skill`. Pipeline state files conform to `ModelPipelineState` from `omnibase_core.models.pipeline`.
+
+> **Note: This contract reference is behavioral guidance for the LLM executing this skill. Runtime validation not yet implemented.**
+
+### Reading sub-skill results
+
+Load result files and check outcomes using model properties — do not compare raw status strings:
+
+```python
+result = ModelSkillResult.from_json(path.read_text())
+
+# Phase advancement check — covers success, partial, and dry_run
+if result.is_success_like:
+    advance_to_next_phase()
+
+# Failure check — explicit failure, not infrastructure error
+elif result.status == EnumSkillResultStatus.FAILED:
+    record_failure_and_apply_policy()
+
+# Non-terminal check — still pending or gated
+elif not result.status.is_terminal:
+    # status is pending, gated, or blocked — do not advance
+    pass
+
+# Access skill-specific fields via extra dict (not direct attribute access).
+# Use .get() with a default — extra may be empty on non-success paths.
+fix_cycles = result.extra.get("fix_cycles_used", 0)        # ci-watch
+merge_commit = result.extra.get("merge_commit")             # auto-merge (None if not merged)
+ticket_close = result.extra.get("ticket_close_status")     # auto-merge (None if not reached)
+```
+
+**Behaviorally significant `extra_status` values by sub-skill (ModelSkillResult consumers only):**
+
+The following sub-skills have adopted `ModelSkillResult`. Use `result.extra_status` to read their domain-specific outcome:
+
+| Sub-Skill | `extra_status` | Orchestrator action |
+|-----------|---------------|---------------------|
+| `local-review` | `"clean"` | Passes clean check — counts toward 2-consecutive-clean requirement |
+| `local-review` | `"clean_with_nits"` | Passes clean check (nits do not reset counter) — counts toward 2-consecutive-clean |
+| `local-review` | `"max_iterations_reached"` | Max iterations reached without clean — post advisory, continue to PR with warning |
+| `ci-watch` | `"passed"` | CI passed — advance to pr_review_loop |
+| `ci-watch` | `"capped"` | Max fix cycles reached — advance to pr_review_loop with warning |
+| `auto-merge` | `"merged"` | PR merged — clear ledger, update Linear to Done |
+| `auto-merge` | `"held"` | HIGH_RISK gate open — pipeline exits with `held` state (non-terminal); resume on human "merge" reply |
+| `auto-merge` | `"timeout"` | Merge gate expired — retryable with new pipeline run |
+
+**Pre-migration sub-skills (raw JSON schema — NOT ModelSkillResult):**
+
+`pr-watch` has not yet adopted `ModelSkillResult` (OMN-3874 scope excluded it). Its result file uses a raw JSON schema where outcome is a top-level `status` string — do NOT use `ModelSkillResult.from_json()` or `result.extra_status` for this sub-skill:
+
+```python
+raw = json.loads(path.read_text())
+pr_watch_status = raw.get("status")  # raw string: "approved" | "capped" | "timeout" | "error"
+if pr_watch_status == "approved":
+    advance_to_integration_verification_gate()
+elif pr_watch_status in ("capped", "timeout", "error"):
+    post_medium_risk_slack_and_stop()
+```
+
+After pr-watch adopts `ModelSkillResult`, replace with `result.is_success_like` / `result.extra_status` checks per the table above.
+
+### Reading pipeline state
+
+Load pipeline state files as `ModelPipelineState`:
+
+```python
+state = ModelPipelineState.from_yaml(path.read_text())
+
+# Access phase history for resume logic
+for record in state.phase_history:
+    # record.phase is EnumPipelinePhase
+    # record.completed_at is datetime (UTC)
+    pass
+
+# Current phase for skip-to detection
+current = state.current_phase  # EnumPipelinePhase
+
+# PR context (populated after create_pr)
+pr_number = state.pr_number   # int | None
+pr_url = state.pr_url         # str | None
+```
+
+`ModelPipelineState` uses `extra="allow"` — legacy state files from older pipeline schema versions are tolerated without error.
+
 ## State Management
 
 Pipeline state is stored at `~/.claude/pipelines/{ticket_id}/state.yaml` as the primary state machine. Linear ticket gets a compact summary mirror (run_id, current phase, blocked reason, artifacts).
