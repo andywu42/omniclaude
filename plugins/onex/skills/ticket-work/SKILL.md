@@ -27,11 +27,10 @@ outputs:
     type: ModelSkillResult
     description: "Written to ~/.claude/skill-results/{context_id}/ticket-work.json"
     fields:
-      - status: done | blocked | error | questions_pending
+      - status: "success" | "blocked" | "pending" | "error"  # EnumSkillResultStatus canonical values
+      - extra_status: "done" | "questions_pending" | null  # domain-specific granularity
       - ticket_id: str
-      - pr_url: str | null
-      - phase_reached: str (intake|research|questions|spec|implementation|review|done)
-      - commits: list[str]
+      - extra: "{pr_url, phase_reached, commits}"
 args:
   - name: ticket_id
     description: Linear ticket ID (e.g., OMN-1807)
@@ -345,27 +344,61 @@ checks, or edge case handling.
 
 ## Skill Result Output
 
+**Output contract:** `ModelSkillResult` from `omnibase_core.models.skill`
+
+> **Note: This contract reference is behavioral guidance for the LLM executing this skill. Runtime validation not yet implemented.**
+
 When invoked as a composable sub-skill (from ticket-pipeline, epic-team, or other orchestrators),
-write `ModelSkillResult` to `~/.claude/skill-results/{context_id}/ticket-work.json` on exit.
+write to: `~/.claude/skill-results/{context_id}/ticket-work.json`
+
+| Field | Value |
+|-------|-------|
+| `skill_name` | `"ticket-work"` |
+| `status` | One of the canonical string values: `"success"`, `"blocked"`, `"pending"`, `"error"` (see mapping below) |
+| `extra_status` | Domain-specific status string (see mapping below) |
+| `run_id` | Correlation ID |
+| `ticket_id` | Linear ticket ID (e.g. `"OMN-1234"`) |
+| `extra` | `{"pr_url": str, "phase_reached": str, "commits": list[str]}` |
+
+> **Note on `context_id`:** Prior schema versions included `context_id` as a top-level field. This field is not part of `ModelSkillResult` — it belongs to the file path convention (`~/.claude/skill-results/{context_id}/ticket-work.json`). Consumers should derive context from the file path, not from `context_id` in the result body.
+
+**Status mapping:**
+
+| Current status | Canonical `status` (string value) | `extra_status` |
+|----------------|-----------------------------------|----------------|
+| `done` | `"success"` (`EnumSkillResultStatus.SUCCESS`) | `"done"` |
+| `blocked` | `"blocked"` (`EnumSkillResultStatus.BLOCKED`) | `null` |
+| `questions_pending` | `"pending"` (`EnumSkillResultStatus.PENDING`) | `"questions_pending"` |
+| `error` | `"error"` (`EnumSkillResultStatus.ERROR`) | `null` |
+
+**Behaviorally significant `extra_status` values:**
+- `"done"` → ticket-pipeline treats as SUCCESS; advances to local_review phase
+- `"questions_pending"` → ticket-pipeline treats as PENDING; posts Slack notification blocked, awaits human answers before retrying
+- `null` (blocked) → ticket-pipeline treats as BLOCKED; halts pipeline, emits Slack notification awaiting human gate approval
+
+**Promotion rule for `extra` fields:** If a field appears in 3+ producer skills, open a ticket to evaluate promotion to a first-class field. If any orchestrator consumer (epic-team, ticket-pipeline) branches on `extra["x"]`, that field MUST be promoted.
+
+Example result:
 
 ```json
 {
-  "skill": "ticket-work",
-  "status": "done",
-  "ticket_id": "{ticket_id}",
-  "pr_url": "https://github.com/org/repo/pull/123",
-  "phase_reached": "done",
-  "commits": ["abc1234", "def5678"],
-  "context_id": "{context_id}"
+  "skill_name": "ticket-work",
+  "status": "success",
+  "extra_status": "done",
+  "ticket_id": "OMN-1234",
+  "run_id": "pipeline-1709856000-OMN-1234",
+  "extra": {
+    "pr_url": "https://github.com/org/repo/pull/123",
+    "phase_reached": "done",
+    "commits": ["abc1234", "def5678"]
+  }
 }
 ```
 
-**Status values**: `done` | `blocked` | `questions_pending` | `error`
-
-- `done`: All phases complete; PR created or changes committed
-- `blocked`: Waiting for human input (human gate triggered in non-autonomous mode)
-- `questions_pending`: Stopped at questions phase awaiting answers
-- `error`: Unrecoverable failure (agent error, verification failure, etc.)
+- `status: success` + `extra_status: "done"`: All phases complete; PR created or changes committed
+- `status: blocked`: Waiting for human input (human gate triggered in non-autonomous mode)
+- `status: pending` + `extra_status: "questions_pending"`: Stopped at questions phase awaiting answers
+- `status: error`: Unrecoverable failure (agent error, verification failure, etc.)
 
 When invoked directly by a human (`/ticket-work OMN-XXXX`), skip writing the result file.
 

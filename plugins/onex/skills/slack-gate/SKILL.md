@@ -38,11 +38,9 @@ outputs:
     type: ModelSkillResult
     description: "Written to ~/.claude/skill-results/{context_id}/slack-gate.json"
     fields:
-      - status: accepted | rejected | timeout
-      - risk_level: str
-      - reply: str | null
-      - thread_ts: str | null
-      - elapsed_minutes: int
+      - status: "success" | "failed" | "error"  # EnumSkillResultStatus canonical values
+      - extra_status: "accepted" | "rejected" | "timeout"  # domain-specific granularity
+      - extra: "{risk_level, reply, thread_ts, elapsed_minutes}"
 args:
   - name: risk_level
     description: "Gate tier: LOW_RISK|MEDIUM_RISK|HIGH_RISK"
@@ -310,25 +308,57 @@ exec claude --skill onex:slack-gate \
 
 ## Skill Result Output
 
-Write `ModelSkillResult` to `~/.claude/skill-results/{context_id}/slack-gate.json` on exit.
+**Output contract:** `ModelSkillResult` from `omnibase_core.models.skill`
+
+> **Note: This contract reference is behavioral guidance for the LLM executing this skill. Runtime validation not yet implemented.**
+
+Write to: `~/.claude/skill-results/{context_id}/slack-gate.json`
+
+| Field | Value |
+|-------|-------|
+| `skill_name` | `"slack-gate"` |
+| `status` | One of the canonical string values: `"success"`, `"failed"`, `"error"` (see mapping below) |
+| `extra_status` | Domain-specific status string (see mapping below) |
+| `run_id` | Correlation ID |
+| `extra` | `{"risk_level": str, "reply": str, "thread_ts": str, "elapsed_minutes": int}` |
+
+> **Note on `context_id`:** Prior schema versions included `context_id` as a top-level field. This field is not part of `ModelSkillResult` — it belongs to the file path convention (`~/.claude/skill-results/{context_id}/slack-gate.json`). Consumers should derive context from the file path, not from `context_id` in the result body.
+
+**Status mapping:**
+
+| Current status | Canonical `status` (string value) | `extra_status` |
+|----------------|-----------------------------------|----------------|
+| `accepted` | `"success"` (`EnumSkillResultStatus.SUCCESS`) | `"accepted"` |
+| `rejected` | `"failed"` (`EnumSkillResultStatus.FAILED`) | `"rejected"` |
+| `timeout` | `"error"` (`EnumSkillResultStatus.ERROR`) | `"timeout"` |
+
+**Behaviorally significant `extra_status` values:**
+- `"accepted"` → caller orchestrator proceeds with the gated action (e.g., merge, deploy, cross-repo handoff)
+- `"rejected"` → caller orchestrator halts the gated action; records hold reason and exits with FAILED
+- `"timeout"` → caller orchestrator behavior varies by risk tier: MEDIUM_RISK escalates, HIGH_RISK holds (same as rejected for merge gates)
+
+**Promotion rule for `extra` fields:** If a field appears in 3+ producer skills, open a ticket to evaluate promotion to a first-class field. If any orchestrator consumer (epic-team, ticket-pipeline) branches on `extra["x"]`, that field MUST be promoted.
+
+Example result:
 
 ```json
 {
-  "skill": "slack-gate",
-  "status": "accepted",
-  "risk_level": "LOW_RISK",
-  "reply": null,
-  "thread_ts": "1234567890.123456",
-  "elapsed_minutes": 0,
-  "context_id": "{context_id}"
+  "skill_name": "slack-gate",
+  "status": "success",
+  "extra_status": "accepted",
+  "run_id": "pipeline-1709856000-OMN-1234",
+  "extra": {
+    "risk_level": "LOW_RISK",
+    "reply": null,
+    "thread_ts": "1234567890.123456",
+    "elapsed_minutes": 0
+  }
 }
 ```
 
-**Status values**: `accepted` | `rejected` | `timeout`
-
-- `accepted`: Reply matched accept_keywords, or LOW_RISK (auto-approve, no polling)
-- `rejected`: Reply matched reject_keywords
-- `timeout`: MEDIUM_RISK or HIGH_RISK gate timed out without qualifying reply
+- `status: success` + `extra_status: "accepted"`: Reply matched accept_keywords, or LOW_RISK (auto-approve, no polling)
+- `status: failed` + `extra_status: "rejected"`: Reply matched reject_keywords
+- `status: error` + `extra_status: "timeout"`: MEDIUM_RISK or HIGH_RISK gate timed out without qualifying reply
 
 ## Credential Resolution
 

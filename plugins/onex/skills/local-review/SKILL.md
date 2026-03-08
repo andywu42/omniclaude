@@ -34,9 +34,9 @@ outputs:
     type: ModelSkillResult
     description: "Written to ~/.claude/skill-results/{context_id}/local-review.json"
     fields:
-      - status: clean | clean_with_nits | max_iterations_reached | report_only | changes_staged | error
-      - iterations_run: int
-      - issues_remaining: dict (critical/major/minor/nit counts)
+      - status: "success" | "partial" | "error"  # EnumSkillResultStatus canonical values
+      - extra_status: "clean" | "clean_with_nits" | "max_iterations_reached" | null  # domain-specific granularity
+      - extra: "{iterations_run, issues_remaining}"
 args:
   - name: --uncommitted
     description: Only review uncommitted changes (ignore committed)
@@ -490,22 +490,59 @@ Load `prompt.md` only if you need reference details for edge case handling or im
 
 ## Skill Result Output
 
+**Output contract:** `ModelSkillResult` from `omnibase_core.models.skill`
+
+> **Note: This contract reference is behavioral guidance for the LLM executing this skill. Runtime validation not yet implemented.**
+
 When invoked as a composable sub-skill (from ticket-pipeline, epic-team, or other orchestrators),
-write `ModelSkillResult` to `~/.claude/skill-results/{context_id}/local-review.json` on exit.
+write to: `~/.claude/skill-results/{context_id}/local-review.json`
+
+| Field | Value |
+|-------|-------|
+| `skill_name` | `"local-review"` |
+| `status` | One of the canonical string values: `"success"`, `"partial"`, `"error"` (see mapping below) |
+| `extra_status` | Domain-specific status string (see mapping below) |
+| `run_id` | Correlation ID |
+| `extra` | `{"iterations_run": int, "issues_remaining": {"critical": int, "major": int, "minor": int, "nit": int}}` |
+
+> **Note on `context_id`:** Prior schema versions included `context_id` as a top-level field. This field is not part of `ModelSkillResult` — it belongs to the file path convention (`~/.claude/skill-results/{context_id}/local-review.json`). Consumers should derive context from the file path, not from `context_id` in the result body.
+
+**Status mapping:**
+
+| Current status | Canonical `status` (string value) | `extra_status` |
+|----------------|-----------------------------------|----------------|
+| `clean` | `"success"` (`EnumSkillResultStatus.SUCCESS`) | `"clean"` |
+| `clean_with_nits` | `"success"` (`EnumSkillResultStatus.SUCCESS`) | `"clean_with_nits"` |
+| `max_iterations_reached` | `"partial"` (`EnumSkillResultStatus.PARTIAL`) | `"max_iterations_reached"` |
+| `report_only` | `"success"` (`EnumSkillResultStatus.SUCCESS`) | `null` |
+| `changes_staged` | `"partial"` (`EnumSkillResultStatus.PARTIAL`) | `null` |
+| `error` | `"error"` (`EnumSkillResultStatus.ERROR`) | `null` |
+
+**Behaviorally significant `extra_status` values:**
+- `"clean"` → ticket-pipeline treats as SUCCESS; advances to create_pr phase after 2 consecutive clean runs
+- `"clean_with_nits"` → ticket-pipeline treats as SUCCESS (same advancement path as `"clean"`); nits are recorded but do not block PR creation
+- `"max_iterations_reached"` → ticket-pipeline treats as PARTIAL; posts advisory to PR description, continues to PR creation with a warning — human reviewer decides whether to merge
+- `null` with `status: "success"` (`report_only` mode) → ticket-pipeline treats as SUCCESS; no fixes were applied but review is complete — advances normally
+- `null` with `status: "partial"` (`changes_staged` mode) → ticket-pipeline treats as advisory PARTIAL; fixes were applied but not committed — orchestrator must commit before advancing; if orchestrator cannot detect uncommitted changes, it should halt and notify human
+
+**Promotion rule for `extra` fields:** If a field appears in 3+ producer skills, open a ticket to evaluate promotion to a first-class field. If any orchestrator consumer (epic-team, ticket-pipeline) branches on `extra["x"]`, that field MUST be promoted.
+
+Example result:
 
 ```json
 {
-  "skill": "local-review",
-  "status": "clean_with_nits",
-  "iterations_run": 3,
-  "issues_remaining": {"critical": 0, "major": 0, "minor": 0, "nit": 2},
-  "context_id": "{context_id}"
+  "skill_name": "local-review",
+  "status": "success",
+  "extra_status": "clean_with_nits",
+  "run_id": "pipeline-1709856000-OMN-1234",
+  "extra": {
+    "iterations_run": 3,
+    "issues_remaining": {"critical": 0, "major": 0, "minor": 0, "nit": 2}
+  }
 }
 ```
 
-**Status values**: `clean` | `clean_with_nits` | `max_iterations_reached` | `report_only` | `changes_staged` | `error`
-
-**On error** (agent failed, parse failed, fix failed): set `status: error`, include `error_message`.
+**On error** (agent failed, parse failed, fix failed): set `status: error`, include `error_message` in `extra`.
 
 When invoked directly by a human (`/local-review`), skip writing the result file.
 
