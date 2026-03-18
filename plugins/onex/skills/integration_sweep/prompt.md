@@ -33,7 +33,7 @@ Resolve `SWEEP_DATE`:
 
 Resolve `ONEX_CC_REPO_PATH`:
 - Check env var `ONEX_CC_REPO_PATH`
-- Fallback: `/Volumes/PRO-G40/Code/omni_home/onex_change_control`
+- Fallback: `/Volumes/PRO-G40/Code/omni_home/onex_change_control`  <!-- local-path-ok -->
 - If path does not exist: emit `INTEGRATION_SWEEP ERROR: ONEX_CC_REPO_PATH not found at <path>` and stop.
 
 ---
