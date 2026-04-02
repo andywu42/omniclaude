@@ -480,6 +480,39 @@ class TopicBase(StrEnum):
     HOOK_HEALTH_ERROR = "onex.evt.omniclaude.hook-health-error.v1"
     """Structured hook error event for health observability dashboard."""
 
+    # ==========================================================================
+    # OmniClaw channel messaging topics (OMN-7185)
+    # Inbound normalized messages from any channel adapter, outbound replies,
+    # and processing observability.
+    # ==========================================================================
+    CHANNEL_MESSAGE_RECEIVED = "onex.cmd.omniclaw.channel-message-received.v1"
+    """Inbound normalized message from any channel adapter. Payload: ModelChannelEnvelope."""
+
+    CHANNEL_REPLY_REQUESTED = "onex.evt.omniclaw.channel-reply-requested.v1"
+    """Outbound response to be dispatched to the originating channel adapter."""
+
+    CHANNEL_MESSAGE_PROCESSED = "onex.evt.omniclaw.channel-message-processed.v1"
+    """Observability event emitted after orchestrator processes a channel message."""
+
+    # ==========================================================================
+    # OmniClaw channel-specific outbound topics (OMN-7187)
+    # Fan-out targets for the reply dispatcher. One per supported channel.
+    # ==========================================================================
+    CHANNEL_DISCORD_OUTBOUND = "onex.cmd.omniclaw.discord-outbound.v1"
+    """Reply routed to Discord adapter."""
+
+    CHANNEL_SLACK_OUTBOUND = "onex.cmd.omniclaw.slack-outbound.v1"
+    """Reply routed to Slack adapter."""
+
+    CHANNEL_TELEGRAM_OUTBOUND = "onex.cmd.omniclaw.telegram-outbound.v1"
+    """Reply routed to Telegram adapter."""
+
+    CHANNEL_EMAIL_OUTBOUND = "onex.cmd.omniclaw.email-outbound.v1"
+    """Reply routed to Email adapter."""
+
+    CHANNEL_SMS_OUTBOUND = "onex.cmd.omniclaw.sms-outbound.v1"
+    """Reply routed to SMS adapter."""
+
 
 def _validate_topic_segment(segment: str, name: str) -> str:
     """Validate a single topic segment (prefix or base segment).
