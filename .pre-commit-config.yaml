@@ -82,7 +82,7 @@ repos:
         entry: bash scripts/check_local_paths_wrapper.sh
         language: system
         types: [text]
-        exclude: '\.secrets\.baseline$|^docs/.*|^tests/fixtures/.*'
+        exclude: '\.secrets\.baseline$|^docs/.*|^tests/fixtures/.*|^tests/.*/fixtures/.*'
         pass_filenames: true
         stages: [pre-commit]
 
