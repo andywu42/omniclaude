@@ -17,7 +17,7 @@ author: OmniClaude Team
 composable: true
 args:
   - name: --repo
-    description: "Repo name to audit (default: current repo under omni_home)"
+    description: "Repo name to audit (default: resolved from git root)"
     required: false
   - name: --since-days
     description: "Staleness threshold in days (default: 14)"
@@ -152,7 +152,7 @@ PASS plans:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--repo <name>` | current repo | Repo to audit (resolved under omni_home/) |
+| `--repo <name>` | current repo | Repo to audit (resolved from git root) |
 | `--since-days N` | 14 | Staleness threshold in days |
 | `--fail-only` | false | Only emit FAIL lines (quiet mode) |
 | `--dry-run` | false | No ticket creation |
