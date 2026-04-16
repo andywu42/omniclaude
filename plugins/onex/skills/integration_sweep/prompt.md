@@ -33,7 +33,7 @@ Resolve `SWEEP_DATE`:
 
 Resolve `ONEX_CC_REPO_PATH`:
 - Check env var `ONEX_CC_REPO_PATH`
-- Fallback: `/Volumes/PRO-G40/Code/omni_home/onex_change_control`  <!-- local-path-ok -->
+- Fallback: `/Volumes/PRO-G40/Code/omni_home/onex_change_control`  # local-path-ok: env var default fallback in documentation
 - If path does not exist: emit `INTEGRATION_SWEEP ERROR: ONEX_CC_REPO_PATH not found at <path>` and stop.
 
 ---
@@ -286,7 +286,7 @@ may not have all infra running.
 
 1. Locate the omnidash repo:
    ```bash
-   OMNIDASH_DIR="${OMNIDASH_DIR:-/Volumes/PRO-G40/Code/omni_home/omnidash}"  # local-path-ok
+   OMNIDASH_DIR="${OMNIDASH_DIR:-/Volumes/PRO-G40/Code/omni_home/omnidash}"  # local-path-ok: env var default fallback
    ```
    - If directory does not exist: record `status=UNKNOWN`, `reason=PROBE_UNAVAILABLE`,
      `evidence="omnidash directory not found at $OMNIDASH_DIR"`. Skip remaining sub-steps.
@@ -332,7 +332,7 @@ Verify Drizzle schema definitions match migration DDL.
 
 **Check 1 -- Run omnidash parity script:**
 ```bash
-OMNIDASH_DIR="${OMNIDASH_DIR:-/Volumes/PRO-G40/Code/omni_home/omnidash}"  # local-path-ok
+OMNIDASH_DIR="${OMNIDASH_DIR:-/Volumes/PRO-G40/Code/omni_home/omnidash}"  # local-path-ok: env var default fallback
 cd $OMNIDASH_DIR && npm run db:check-drizzle-parity
 ```
 Exit 0 = PASS. Exit 1 = FAIL with specific table mismatches.

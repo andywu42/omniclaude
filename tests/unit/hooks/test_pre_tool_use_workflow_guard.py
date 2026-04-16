@@ -243,9 +243,9 @@ def test_write_tool_passed_through_without_omni_home(tmp_path: Path) -> None:
         ),
         patch.dict("os.environ", {}, clear=False),
     ):
-        # Ensure OMNI_HOME is not set
         import os
 
+        os.environ.pop("ONEX_REGISTRY_ROOT", None)
         os.environ.pop("OMNI_HOME", None)
         exit_code, output = run_guard(hook_json)
 
@@ -283,7 +283,7 @@ def test_edit_to_canonical_clone_is_blocked(tmp_path: Path) -> None:
             "omniclaude.hooks.pre_tool_use_workflow_guard._resolve_project_root",
             return_value=tmp_path,
         ),
-        patch.dict("os.environ", {"OMNI_HOME": str(omni_home)}),
+        patch.dict("os.environ", {"ONEX_REGISTRY_ROOT": str(omni_home)}),
     ):
         exit_code, output = run_guard(hook_json)
 
@@ -310,7 +310,7 @@ def test_write_to_canonical_clone_is_blocked(tmp_path: Path) -> None:
             "omniclaude.hooks.pre_tool_use_workflow_guard._resolve_project_root",
             return_value=tmp_path,
         ),
-        patch.dict("os.environ", {"OMNI_HOME": str(omni_home)}),
+        patch.dict("os.environ", {"ONEX_REGISTRY_ROOT": str(omni_home)}),
     ):
         exit_code, output = run_guard(hook_json)
 
@@ -333,7 +333,7 @@ def test_edit_in_worktree_is_allowed(tmp_path: Path) -> None:
             "omniclaude.hooks.pre_tool_use_workflow_guard._resolve_project_root",
             return_value=tmp_path,
         ),
-        patch.dict("os.environ", {"OMNI_HOME": str(omni_home)}),
+        patch.dict("os.environ", {"ONEX_REGISTRY_ROOT": str(omni_home)}),
     ):
         exit_code, output = run_guard(hook_json)
 
@@ -353,7 +353,7 @@ def test_edit_outside_omni_home_is_allowed(tmp_path: Path) -> None:
             "omniclaude.hooks.pre_tool_use_workflow_guard._resolve_project_root",
             return_value=tmp_path,
         ),
-        patch.dict("os.environ", {"OMNI_HOME": str(omni_home)}),
+        patch.dict("os.environ", {"ONEX_REGISTRY_ROOT": str(omni_home)}),
     ):
         exit_code, output = run_guard(hook_json)
 
@@ -373,7 +373,7 @@ def test_edit_to_omni_home_top_level_is_allowed(tmp_path: Path) -> None:
             "omniclaude.hooks.pre_tool_use_workflow_guard._resolve_project_root",
             return_value=tmp_path,
         ),
-        patch.dict("os.environ", {"OMNI_HOME": str(omni_home)}),
+        patch.dict("os.environ", {"ONEX_REGISTRY_ROOT": str(omni_home)}),
     ):
         exit_code, output = run_guard(hook_json)
 
@@ -393,6 +393,7 @@ def test_write_protection_without_omni_home_env_allows(tmp_path: Path) -> None:
     ):
         import os
 
+        os.environ.pop("ONEX_REGISTRY_ROOT", None)
         os.environ.pop("OMNI_HOME", None)
         exit_code, output = run_guard(hook_json)
 
