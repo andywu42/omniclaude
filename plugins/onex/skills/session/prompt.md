@@ -43,6 +43,82 @@ the blocking health dimensions before resuming any dispatch work.
 
 ---
 
+## Step 2.5: Diagnosis-Flag Escalation <!-- ai-slop-ok: skill-step-heading -->
+
+**This step is NOT skipped by `--skip-health`.** Stale diagnosis flags are escalation-class
+issues that must surface at every session start regardless of gate mode.
+
+### Step 2.5a: Scan diagnosis docs
+
+Run:
+```bash
+find docs/ -name "diagnosis-*.md" -type f 2>/dev/null
+```
+
+For each file found, check its last-modified time:
+```bash
+stat -f "%m %N" docs/diagnosis-*.md   # macOS
+# or: stat --format="%Y %n" docs/diagnosis-*.md   # Linux
+```
+
+If `(now - mtime) > 86400` seconds (24 hours):
+1. Read the file and scan for a `Resolved:` marker anywhere in the content.
+2. If no `Resolved:` marker is present, add this file to the **stale escalation list**.
+
+### Step 2.5b: Check `.onex_state/diagnosis-required.flag`
+
+If `.onex_state/diagnosis-required.flag` exists:
+1. Read its contents (fields: `ticket`, `attempt_count`, `diagnosis_doc`).
+2. Check mtime of the flag file. If `(now - mtime) > 86400` seconds:
+   - Add to the stale escalation list.
+3. Verify whether the referenced `diagnosis_doc` contains a `Resolved:` marker.
+   If it does, the flag is stale-resolved — delete the flag file and skip escalation for it.
+
+### Step 2.5c: Emit escalation
+
+If the stale escalation list is non-empty:
+
+**Announce (non-silent — this MUST be shown to the user):**
+
+```
+ESCALATION: Unresolved diagnosis flags older than 24h detected.
+
+{for each stale entry:}
+  - {filename} (ticket: {ticket}, age: {age_hours}h)
+    Doc: {diagnosis_doc path}
+
+These flags indicate Two-Strike Protocol violations that were never reviewed.
+Session start is blocked until you acknowledge:
+  → Type "acknowledged" to proceed (diagnosis docs remain open)
+  → Type "resolved <ticket>" to mark a specific entry as resolved
+  → Type "skip" to bypass this check (logged as friction)
+```
+
+Wait for user response before proceeding to Step 3.
+
+- **"acknowledged"**: Log acknowledgement to `.onex_state/session/diagnosis_escalations.jsonl`
+  and continue to Step 3.
+- **"resolved \<ticket\>"**: Use the following deterministic target-doc selection rule;
+  do NOT guess the slug:
+  1. **Prefer the flag:** if `.onex_state/diagnosis-required.flag` exists and its
+     `ticket:` field equals `<ticket>`, use the path in that flag's `diagnosis_doc:`
+     field as the only write target.
+  2. **Fallback:** if no matching flag exists, scan `docs/diagnosis-*.md` for entries
+     whose header or front-matter declares `Ticket: <ticket>`. Accept exactly one
+     match. If zero or multiple matches, prompt the user to disambiguate with the
+     full path — do not pick arbitrarily.
+  3. Append `Resolved: {timestamp} — marked resolved at session start` to the
+     selected doc.
+  4. Delete `.onex_state/diagnosis-required.flag` only if its `ticket:` field
+     exactly equals `<ticket>`.
+  5. Continue to Step 3.
+- **"skip"**: Log friction event to `.onex_state/friction/` with category
+  `diagnosis_escalation_bypassed`. Continue to Step 3.
+
+If the stale escalation list is empty, proceed silently to Step 3.
+
+---
+
 ## Step 3: Phase 1 — System Health Gate <!-- ai-slop-ok: skill-step-heading -->
 
 Skip if `--skip-health` is set (warn: "Skipping health gate — emergency mode").
