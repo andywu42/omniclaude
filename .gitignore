@@ -34,6 +34,8 @@ lib/
 !tests/unit/hooks/lib/**
 !tests/unit/lib/
 !tests/unit/lib/**
+!scripts/lib/
+!scripts/lib/**
 # Re-exclude __pycache__ within excepted lib directories
 agents/lib/__pycache__/
 agents/lib/**/__pycache__/
@@ -48,6 +50,8 @@ tests/unit/hooks/lib/__pycache__/
 tests/unit/hooks/lib/**/__pycache__/
 tests/unit/lib/__pycache__/
 tests/unit/lib/**/__pycache__/
+scripts/lib/__pycache__/
+scripts/lib/**/__pycache__/
 plugins/onex/hooks/lib/**/__pycache__/
 lib64/
 parts/
