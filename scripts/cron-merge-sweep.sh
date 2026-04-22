@@ -364,6 +364,153 @@ fi
 log "Merge-sweep run ${RUN_ID} finished: status=${FINAL_STATUS}, attempts=${ATTEMPT}, auth_refreshes=${AUTH_REFRESH_COUNT}"
 log "Full log: ${LOG_DIR}/${RUN_ID}.log"
 
+# ---------------------------------------------------------------------------
+# Queue method-mismatch heal — runs after sweep, fail-open [OMN-9434]
+# ---------------------------------------------------------------------------
+# Detects PRs that are armed (autoMergeRequest non-null) + CLEAN but are NOT
+# present in mergeQueue.entries. This is the symptom of a silent queue-drop
+# caused by a mergeMethod mismatch between the arm call and the queue ruleset
+# (see memory/feedback_merge_queue_method_mismatch.md).
+#
+# Recovery: dequeue + re-enqueue (enqueuePullRequest uses the queue's own
+# method, eliminating any mismatch).
+#
+# Fail-open: any GraphQL or gh error is logged but does NOT abort the tick.
+# Each heal action is logged to stdout for audit trail.
+
+_queue_heal() {
+  local org="OmniNode-ai"
+  # Repos that use merge queues — must match the org's queue-enabled repos.
+  # Sourced from ONEX_QUEUE_REPOS env var (CSV) or falls back to the known set.
+  local repos_csv="${ONEX_QUEUE_REPOS:-omniclaude,omnibase_core,omnibase_spi,omnibase_infra,omnibase_compat,omniintelligence,omnimemory,omninode_infra,onex_change_control}"
+  # Configurable dequeue→requeue pause (seconds). Default 2. Override for tests.
+  local heal_sleep="${ONEX_QUEUE_HEAL_SLEEP:-2}"
+  local heal_count=0
+  local check_count=0
+
+  log "[queue-heal] Starting method-mismatch scan across ${repos_csv}"
+
+  # Use tr+while for bash 3.2 compatibility (read -a/-ra requires bash 4+).
+  # Each token is trimmed of leading/trailing whitespace before use.
+  while IFS= read -r repo_name; do
+    # Trim whitespace and skip empty/whitespace-only tokens
+    repo_name="${repo_name#"${repo_name%%[! ]*}"}"
+    repo_name="${repo_name%"${repo_name##*[! ]}"}"
+    [[ -z "${repo_name}" ]] && continue
+    # Reject tokens containing slashes or shell-special chars (already org-qualified entries)
+    if echo "${repo_name}" | grep -qE '[^a-zA-Z0-9_.-]'; then
+      log "[queue-heal] WARN: skipping invalid repo token '${repo_name}'"
+      continue
+    fi
+
+    local full_repo="${org}/${repo_name}"
+
+    # Fetch open PRs that have auto-merge armed and are in CLEAN state.
+    # --limit 300: gh pr list defaults to 30; raise to cover repos with many open PRs.
+    # --json fields: number, id (node_id for GraphQL), autoMergeRequest, mergeStateStatus
+    local pr_json
+    pr_json=$(gh pr list \
+      --repo "${full_repo}" \
+      --state open \
+      --limit 300 \
+      --json number,id,autoMergeRequest,mergeStateStatus \
+      2>>"${LOG_DIR}/${RUN_ID}.log") || {
+      log "[queue-heal] WARN: gh pr list failed for ${full_repo} — skipping"
+      continue
+    }
+
+    # Filter: armed (autoMergeRequest != null) + CLEAN state; emit "number:id" pairs
+    local armed_prs
+    armed_prs=$(echo "${pr_json}" | \
+      jq -r '.[] | select(.autoMergeRequest != null and .mergeStateStatus == "CLEAN") | "\(.number):\(.id)"' \
+      2>>"${LOG_DIR}/${RUN_ID}.log") || {
+      log "[queue-heal] WARN: jq filter failed for ${full_repo} — skipping"
+      continue
+    }
+
+    if [[ -z "${armed_prs}" ]]; then
+      continue
+    fi
+
+    # Fetch current merge queue entries for this repo.
+    # GitHub's merge queue API hard-caps at 100 entries per queue (enforced server-side).
+    # PRs beyond 100 cannot be in the queue regardless of the 'first' value we pass.
+    # Using first:100 therefore covers the entire possible queue membership set.
+    local queue_entries
+    queue_entries=$(gh api graphql \
+      -f query="{ repository(owner: \"${org}\", name: \"${repo_name}\") {
+        mergeQueue { entries(first: 100) { nodes { pullRequest { number } } } }
+      } }" \
+      --jq '.data.repository.mergeQueue.entries.nodes[].pullRequest.number' \
+      2>>"${LOG_DIR}/${RUN_ID}.log") || {
+      log "[queue-heal] WARN: mergeQueue query failed for ${full_repo} — skipping"
+      continue
+    }
+
+    # For each armed+CLEAN PR, check if it is in the queue.
+    # Each line is "number:node_id" — split on ':' to avoid an extra REST call per PR.
+    while IFS= read -r pr_entry; do
+      [[ -z "${pr_entry}" ]] && continue
+      local pr_num pr_node_id
+      pr_num="${pr_entry%%:*}"
+      pr_node_id="${pr_entry#*:}"
+      check_count=$((check_count + 1))
+
+      if echo "${queue_entries}" | grep -qx "${pr_num}"; then
+        # PR is in the queue — no heal needed
+        continue
+      fi
+
+      # PR is armed + CLEAN but NOT in queue: silent method-mismatch drop
+      log "[queue-heal] HEALING ${full_repo}#${pr_num}: armed+CLEAN but not in mergeQueue — dequeue+requeue"
+
+      # Dequeue (no-op if not queued; safe to call regardless).
+      # DequeuePullRequestInput uses 'id' (not 'pullRequestId') per GitHub schema.
+      gh api graphql \
+        -f query="mutation(\$pr: ID!) { dequeuePullRequest(input: {id: \$pr}) { clientMutationId } }" \
+        -f pr="${pr_node_id}" \
+        >>"${LOG_DIR}/${RUN_ID}.log" 2>&1 || {
+        log "[queue-heal] WARN: dequeuePullRequest failed for ${full_repo}#${pr_num} — attempting requeue anyway"
+      }
+
+      # Brief pause so GitHub processes the dequeue before re-entry
+      sleep "${heal_sleep}"
+
+      # Re-enqueue: enqueuePullRequest uses the queue's configured method (no mergeMethod arg).
+      # EnqueuePullRequestInput uses 'pullRequestId' per GitHub schema.
+      local requeue_result
+      requeue_result=$(gh api graphql \
+        -f query="mutation(\$pr: ID!) { enqueuePullRequest(input: {pullRequestId: \$pr}) { mergeQueueEntry { position state } } }" \
+        -f pr="${pr_node_id}" \
+        2>>"${LOG_DIR}/${RUN_ID}.log") || {
+        log "[queue-heal] WARN: enqueuePullRequest failed for ${full_repo}#${pr_num} — heal incomplete"
+        continue
+      }
+
+      # Validate GraphQL response for semantic errors (gh exits 0 even on schema errors)
+      if echo "${requeue_result}" | jq -e '.errors | if . then length > 0 else false end' >/dev/null 2>&1; then
+        local gql_err
+        gql_err=$(echo "${requeue_result}" | jq -r '.errors[0].message // "unknown"' 2>/dev/null)
+        log "[queue-heal] WARN: enqueuePullRequest GraphQL error for ${full_repo}#${pr_num}: ${gql_err} — heal incomplete"
+        continue
+      fi
+
+      local position
+      position=$(echo "${requeue_result}" | jq -r '.data.enqueuePullRequest.mergeQueueEntry.position // "unknown"' 2>/dev/null)
+      log "[queue-heal] HEALED ${full_repo}#${pr_num}: re-enqueued at position ${position}"
+      heal_count=$((heal_count + 1))
+
+    done <<< "${armed_prs}"
+  done <<< "$(echo "${repos_csv}" | tr ',' '\n')"
+
+  log "[queue-heal] Complete: checked ${check_count} armed+CLEAN PRs, healed ${heal_count} method-mismatch drops"
+}
+
+# Run heal block fail-open — errors inside _queue_heal are already logged;
+# a non-zero exit from _queue_heal must not abort the tick.
+_queue_heal 2>>"${LOG_DIR}/${RUN_ID}.log" || \
+  log "[queue-heal] WARN: heal block exited non-zero (fail-open, tick continues)"
+
 # Exit codes:
 # 0 = success
 # 1 = non-auth failure
