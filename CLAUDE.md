@@ -52,7 +52,7 @@ independently — they never hit thresholds.
 ## Workflow Dispatch Rules
 
 - When executing plans or tasks, ALWAYS use the correct skill/workflow (hostile-reviewer, design-to-plan, epic-team, merge-sweep, ticket-pipeline) rather than ad-hoc implementation. Never replicate a skill's logic inline — dispatch to the skill.
-- When dispatching work to sub-agents or polymorphic agents, verify: (1) correct handoff file is referenced, (2) parent epic is set on tickets, (3) agent uses polymorphic dispatch. Do not blindly dispatch without understanding the situation first.
+- When dispatching work to sub-agents or general-purpose agents, verify: (1) correct handoff file is referenced, (2) parent epic is set on tickets, (3) agent uses polymorphic dispatch. Do not blindly dispatch without understanding the situation first.
 - When working with Linear tickets in bulk, use rate-limit-aware batching (max 5-10 per batch with delays). Always set parent epic when creating tickets in bulk.
 
 ---
@@ -156,7 +156,7 @@ What happens when infrastructure is unavailable:
 | **Emit daemon down** | Events dropped, hook continues | 0 | Yes (events) |
 | **Kafka unavailable** | Daemon buffers briefly, then drops | 0 | Yes (events) |
 | **PostgreSQL down** | Logging skipped if `ENABLE_POSTGRES=true` | 0 | Yes (logs) |
-| **Routing timeout (5s)** | Fallback to default agent | 0 | No |
+| **Routing timeout (5s)** | Returns no match (fail-fast, no fallback) | 0 | No |
 | **Malformed stdin JSON** | Hook logs error, passes through empty | 0 | No |
 | **Agent YAML not found** | Uses default agent, logs warning | 0 | No |
 | **Context injection fails** | Proceeds without patterns | 0 | No |
@@ -468,7 +468,7 @@ ls -la plugins/onex/hooks/scripts/*.sh                              # Check scri
 |---------|-------------|-----|
 | Events not emitting | Daemon not started | SessionStart hook must run first to start the daemon |
 | Hook fails with exit 1 | Wrong Python interpreter | Check `find_python()` logic; set `PLUGIN_PYTHON_BIN` |
-| Routing returns `polymorphic-agent` for everything | Routing service timeout | Check network connectivity to routing service (5s timeout) |
+| Routing returns no match | Routing service timeout | Check network connectivity to routing service (5s timeout) |
 | Context injection empty | Database unreachable | Check `POSTGRES_HOST`/`POSTGRES_PORT` in `.env`; injection has 1s timeout |
 
 ---

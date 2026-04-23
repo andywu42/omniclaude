@@ -349,7 +349,7 @@ emergency_bypass:
 
    ```
    Task(
-     subagent_type="onex:polymorphic-agent",
+     subagent_type="general-purpose",
      description="Implement {ticket_id}: {title}",
      prompt="Implement the following requirements for {ticket_id}: {title}.
 
@@ -446,7 +446,7 @@ except AutomationError as e:
 3. **Dispatch implementation to a separate agent:**
    ```
    Task(
-     subagent_type="onex:polymorphic-agent",
+     subagent_type="general-purpose",
      description="Implement {ticket_id}: {title}",
      prompt="Implement the following requirements for {ticket_id}: {title}.
 
@@ -468,13 +468,13 @@ except AutomationError as e:
    )
    ```
 
-   This spawns a polymorphic agent with its own context window to implement the requirements.
+   This spawns a general-purpose agent with its own context window to implement the requirements.
 
 4. After the implementation agent completes, commit changes (append to `commits[]`)
 5. Update `pr_url` if PR created
 
 **Implementation via Task dispatch:**
-- Requirements from the contract are passed to a polymorphic agent via Task()
+- Requirements from the contract are passed to a general-purpose agent via Task()
 - The agent runs in its own context window (avoids exhausting the orchestrator's context)
 - The orchestrator reads the agent's result to determine success/failure
 - Quality gates are enforced after the agent completes

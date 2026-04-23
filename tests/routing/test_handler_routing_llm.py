@@ -245,7 +245,7 @@ class TestHandlerRoutingLlm:
     ) -> None:
         agents = (
             _make_agent("agent-debugger", triggers=("debug",)),
-            _make_agent("polymorphic-agent", triggers=("poly",)),
+            _make_agent("general-purpose", triggers=("poly",)),
         )
         request = _make_request("use agent-debugger", agents)
 
@@ -267,7 +267,7 @@ class TestHandlerRoutingLlm:
         """When all candidates fall below the confidence threshold, fall back without calling the LLM."""
         agents = (
             _make_agent("agent-api-architect", triggers=("api design",)),
-            _make_agent("polymorphic-agent", triggers=("poly",)),
+            _make_agent("general-purpose", triggers=("poly",)),
         )
         request = _make_request(
             "write me a haiku about autumn leaves", agents, threshold=0.99
@@ -278,7 +278,7 @@ class TestHandlerRoutingLlm:
 
         mock_llm.assert_not_called()
         assert result.routing_policy == "fallback_default"
-        assert result.selected_agent == "polymorphic-agent"
+        assert result.selected_agent == "general-purpose"
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -293,7 +293,7 @@ class TestHandlerRoutingLlm:
 
         mock_llm.assert_not_called()
         assert result.routing_policy == "fallback_default"
-        assert result.selected_agent == "polymorphic-agent"
+        assert result.selected_agent == "general-purpose"
         assert result.confidence == 0.0
         assert len(result.candidates) == 0
 
@@ -306,7 +306,7 @@ class TestHandlerRoutingLlm:
         agents = (
             _make_agent("agent-debugger", triggers=("debug", "troubleshoot")),
             _make_agent("agent-api-architect", triggers=("api design",)),
-            _make_agent("polymorphic-agent", triggers=("poly",)),
+            _make_agent("general-purpose", triggers=("poly",)),
         )
         request = _make_request("I need to debug this error", agents)
 
@@ -332,7 +332,7 @@ class TestHandlerRoutingLlm:
     ) -> None:
         agents = (
             _make_agent("agent-debugger", triggers=("debug", "troubleshoot")),
-            _make_agent("polymorphic-agent", triggers=("poly",)),
+            _make_agent("general-purpose", triggers=("poly",)),
         )
         request = _make_request("help me debug this", agents)
 
@@ -359,7 +359,7 @@ class TestHandlerRoutingLlm:
     ) -> None:
         agents = (
             _make_agent("agent-debugger", triggers=("debug", "troubleshoot")),
-            _make_agent("polymorphic-agent", triggers=("poly",)),
+            _make_agent("general-purpose", triggers=("poly",)),
         )
         request = _make_request("debug this issue", agents)
 
@@ -384,7 +384,7 @@ class TestHandlerRoutingLlm:
         import httpx
 
         candidates = [_make_candidate("agent-debugger")]
-        agent_names = {"agent-debugger", "polymorphic-agent"}
+        agent_names = {"agent-debugger", "general-purpose"}
 
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -417,7 +417,7 @@ class TestHandlerRoutingLlm:
         import httpx
 
         candidates = [_make_candidate("agent-debugger")]
-        agent_names = {"agent-debugger", "polymorphic-agent"}
+        agent_names = {"agent-debugger", "general-purpose"}
 
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -565,7 +565,7 @@ class TestHandlerRoutingLlm:
         agents = (
             _make_agent("agent-debugger", triggers=("debug",)),
             _make_agent("agent-api-architect", triggers=("api",)),
-            _make_agent("polymorphic-agent", triggers=("poly",)),
+            _make_agent("general-purpose", triggers=("poly",)),
         )
         request = _make_request("debug the api endpoint", agents)
 
@@ -608,7 +608,7 @@ class TestHandlerRoutingLlm:
     async def test_routing_path_is_local(self, handler: HandlerRoutingLlm) -> None:
         agents = (
             _make_agent("agent-debugger", triggers=("debug",)),
-            _make_agent("polymorphic-agent", triggers=("poly",)),
+            _make_agent("general-purpose", triggers=("poly",)),
         )
         request = _make_request("debug this error", agents)
 

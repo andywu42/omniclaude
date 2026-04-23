@@ -448,13 +448,13 @@ No external databases or caches are used - all calculations are done on fresh Li
 
 ## Implementation Notes
 
-### For Polymorphic Agent Dispatch
+### For General-Purpose Agent Dispatch
 
-These skills are designed to be invoked by polymorphic agents:
+These skills are designed to be invoked by general-purpose agents:
 
 ```
 Task(
-  subagent_type="onex:polymorphic-agent",
+  subagent_type="general-purpose",
   description="Generate daily work report",
   prompt="Generate a daily work report for the last 24 hours.
 
