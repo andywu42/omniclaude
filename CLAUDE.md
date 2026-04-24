@@ -41,6 +41,106 @@ independently — they never hit thresholds.
 
 ---
 
+## Per-hook gating: ONEX_HOOKS_MASK [OMN-9612]
+
+> **Rollout status:** The bitmask gate is being wired into hook wrappers by
+> OMN-9617 (Task 5 of the hook-bitmask plan). Until that ticket lands,
+> `ONEX_HOOKS_MASK` has no effect on hooks that have not yet been retrofitted.
+> The infrastructure (enum, CLI, shell library) is being built out in the
+> OMN-9609 epic wave.
+
+Once fully rolled out (post OMN-9617), every omniclaude hook wrapper will
+read `ONEX_HOOKS_MASK` and exit silently (exit 0, no side effect) when its
+bit is cleared. Default is `(1 << N) - 1` where `N = len(EnumHookBit)` —
+i.e. all bits on, width-matched to the enum, current behavior preserved.
+The bit positions are defined by `EnumHookBit` in
+`omnibase_core/src/omnibase_core/enums/enum_hook_bit.py`.
+
+**Important:** when `ONEX_HOOKS_MASK` is absent or unset, the default is
+recomputed from the current enum width — all new hooks are on by default.
+However, once a hex literal is saved to `~/.omnibase/.env`, it is fixed.
+If you add new hooks after saving a mask, run `onex hooks enable <NEW_NAME>`
+or delete the `ONEX_HOOKS_MASK` line from `.env` to restore all-on default.
+
+Set the mask in `~/.omnibase/.env` or export it for the current shell:
+
+```bash
+# Persistent (survives shell restart):
+onex hooks disable CI_REMINDER    # writes ONEX_HOOKS_MASK=0x... to ~/.omnibase/.env
+
+# Session-only:
+export ONEX_HOOKS_MASK=0x...      # overrides .env for current shell only
+```
+
+### `onex hooks` CLI surface
+
+```text
+onex hooks list              # every hook and its current on/off state
+onex hooks mask              # current mask value (default: hex)
+onex hooks mask --format dec # decimal form
+onex hooks mask --format bin # binary form
+onex hooks disable CI_REMINDER
+onex hooks enable  CI_REMINDER
+```
+
+The CLI reads `~/.omnibase/.env` (or the env var `OMNIBASE_ENV_FILE` if set)
+and writes `ONEX_HOOKS_MASK=0x<value>` in-place. New shells pick up the
+updated value on session start via the standard `.env` source.
+
+Note: the `onex hooks` CLI is implemented by OMN-9614 and may not be
+available until that ticket lands. If absent, set `ONEX_HOOKS_MASK`
+manually using the hex literal reported by
+`python3 -c 'from omnibase_core.enums.enum_hook_bit import EnumHookBit; print(hex((1 << len(EnumHookBit)) - 1))'`.
+
+### Relationship to the global kill-switch
+
+`OMNICLAUDE_HOOKS_DISABLE=1` (see "Emergency: disable omniclaude hooks"
+above) short-circuits **every** hook before any bitmask logic runs. Use
+`ONEX_HOOKS_MASK` for targeted, per-hook disablement; use the kill-switch
+for emergency full-off of all hooks.
+
+```text
+OMNICLAUDE_HOOKS_DISABLE=1      ← global kill-switch (highest priority, all hooks off)
+        ↓ (only reached when kill-switch is unset)
+ONEX_HOOKS_MASK bit cleared     ← per-hook disable (bitmask gate)
+        ↓ (only reached when bit is set)
+hook logic runs
+```
+
+### Append-only bit governance
+
+Bit positions are **append-only forever**. The authoritative mapping of hook
+name → bit ordinal lives in:
+
+```text
+omniclaude/docs/hook-bit-inventory.md     ← OMN-9610 output; canonical source
+omnibase_core/src/omnibase_core/enums/enum_hook_bit.py
+```
+
+Never insert a new bit mid-enum. Removed hooks keep tombstone entries;
+renamed hooks append a new bit. See plan
+`omni_home/docs/plans/2026-04-24-hook-bitmask-enum.md` § "Bit Governance
+Rules" and § "Migration and Long-Term Semantics Truth Boundary" for the
+full policy.
+
+### Migration note
+
+**Current state (pre-OMN-9617):** The legacy `OMNICLAUDE_HOOK_<NAME>=0/1`
+per-hook env vars are still active and work as before. Hook scripts such as
+`plugins/onex/hooks/post-tool-use-ruff.sh` and
+`plugins/onex/hooks/scripts/post-tool-use-test-reminder.sh` still branch on
+these variables. If you have scripts or `.env` entries that use them, they
+continue to work.
+
+**After OMN-9617 lands (Task 5 behavioral cutover):** The legacy per-hook
+env vars will be physically removed from every GATE hook wrapper and
+superseded by `ONEX_HOOKS_MASK`. At that point, any reference to
+`OMNICLAUDE_HOOK_<NAME>` in shells or scripts becomes a **no-op**. Migrate
+to `onex hooks disable <NAME>` before or immediately after OMN-9617 merges.
+Do not add new per-hook env vars of the legacy form.
+
+---
+
 ## Skill Usage Policy
 
 - Before any task, check if a matching skill exists. If it does, use it.
