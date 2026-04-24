@@ -43,8 +43,6 @@ outputs:
 ## Routing Contract
 
 - **Classification**: Deterministic
-- **Dispatch**: see `prompt.md` — single invocation against `node_session_orchestrator` from the omnimarket worktree
+- **Dispatch**: single invocation of `node_session_orchestrator` — see `prompt.md` for the exact dispatch command
 - **No inline orchestration**: phases 1/2/3 live in the handler, not this skill
-- **No prose fallback**: on dispatch failure, raise `SkillRoutingError` — never substitute prose
-
-See `prompt.md` for the exact dispatch invocation.
+- **No prose fallback**: on dispatch failure, raise `SkillRoutingError` — surface it directly, do not produce prose
