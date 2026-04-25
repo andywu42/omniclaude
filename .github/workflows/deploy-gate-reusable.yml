@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: 2025 OmniNode.ai Inc.
+# SPDX-License-Identifier: MIT
+#
+# Reusable workflow: deploy-gate validator (DGM-Phase6, OMN-9734).
+# Canonical source — all repos call this via uses: instead of running
+# their own copy of validate_pr_deploy_required.py.
+#
+# Canonical validator: OMN-9685 (omnibase_core PR #902, 2026-04-25).
+# Centralised: OMN-9734 (DGM-Phase6). Supersedes DGM-Phase2.
+#
+# Usage in caller repos:
+#   jobs:
+#     deploy-gate:
+#       uses: OmniNode-ai/omniclaude/.github/workflows/deploy-gate-reusable.yml@main
+#       secrets: inherit
+
+name: Deploy Gate (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      pr-number:
+        description: PR number to validate (defaults to github.event.pull_request.number)
+        type: number
+        required: false
+        default: 0
+      contracts-dir:
+        description: Path to ticket contracts directory relative to repo root
+        type: string
+        required: false
+        default: contracts
+
+jobs:
+  deploy-gate:
+    name: deploy-gate
+    # OMNINODE_SELF_HOSTED_RUNS_ON_V1 — do not edit inline; update plan + all occurrences together
+    runs-on: >-
+      ${{
+        (vars.USE_SELF_HOSTED_RUNNERS == 'true' &&
+         (github.event_name == 'push' ||
+          github.event_name == 'workflow_dispatch' ||
+          github.event_name == 'schedule'))
+        && fromJSON('["self-hosted","omnibase-ci"]')
+        || fromJSON('["ubuntu-latest"]')
+      }}
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@v6
+
+      - name: Skip on merge_group
+        if: github.event_name == 'merge_group'
+        run: |
+          echo "::notice::deploy-gate: merge_group event — skipped (validated on PR branch)."
+
+      - name: Run deploy gate (canonical composite action)
+        if: github.event_name != 'merge_group'
+        uses: OmniNode-ai/omniclaude/.github/actions/deploy-gate@main
+        with:
+          pr-number: ${{ inputs.pr-number != 0 && inputs.pr-number || github.event.pull_request.number }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          contracts-dir: ${{ inputs.contracts-dir }}

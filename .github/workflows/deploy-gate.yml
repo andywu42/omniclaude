@@ -5,6 +5,7 @@
 # Ticket: OMN-8912 | Epic: OMN-8908 (contract-validation-in-CI)
 # Root cause: OMN-8841 — Dockerfile.runtime changed, deploy never dispatched,
 #             deploy-agent inactive 2 days undetected.
+# DGM-Phase6 (OMN-9734): validator moved to composite action for single-source reuse.
 #
 # Required status check: "deploy-gate"
 # Must pass before merging to main on all repos with runtime code.
@@ -24,10 +25,6 @@ on:
 concurrency:
   group: deploy-gate-${{ github.ref }}
   cancel-in-progress: true
-
-env:
-  PYTHON_VERSION: "3.12"
-  UV_VERSION: "0.8.3"
 
 jobs:
   deploy-gate:
@@ -53,24 +50,6 @@ jobs:
         run: |
           echo "::notice::deploy-gate: merge_group event — skipped (validated on PR branch)."
 
-      - name: Set up Python
-        if: github.event_name != 'merge_group'
-        uses: actions/setup-python@v6
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install uv
-        if: github.event_name != 'merge_group'
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: ${{ env.UV_VERSION }}
-
-      - name: Install dependencies
-        if: github.event_name != 'merge_group'
-        run: |
-          uv sync --all-extras
-          uv pip install pyyaml
-
       - name: Get PR number
         if: github.event_name != 'merge_group'
         id: pr-number
@@ -87,10 +66,8 @@ jobs:
 
       - name: Run deploy gate
         if: github.event_name != 'merge_group'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          uv run python scripts/validation/validate_pr_deploy_required.py \
-            --changed-files "$(gh pr diff ${{ steps.pr-number.outputs.pr_number }} --name-only | tr '\n' ' ')" \
-            --pr-body "$(gh pr view ${{ steps.pr-number.outputs.pr_number }} --json body -q '.body')" \
-            --contracts-dir contracts
+        uses: ./.github/actions/deploy-gate
+        with:
+          pr-number: ${{ steps.pr-number.outputs.pr_number }}
+          github-token: ${{ github.token }}
+          contracts-dir: contracts
