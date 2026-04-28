@@ -47,8 +47,24 @@ args:
 
 # PR Polish
 
-Dispatch to the deterministic node — do NOT inline any logic:
+The current live branch-fixing path is the multi-phase workflow described in
+`prompt.md`, but the live dispatch surface now runs through
+`omnimarket.nodes.node_pr_polish`. That node owns repo/worktree resolution,
+branch verification, pre-commit install, and `result.json` persistence before
+invoking this skill inside the correct worktree.
 
-```bash
-onex run node_pr_polish -- --pr-number "${pr_number}" "${@}"
-```
+**This skill is not self-contained.** It requires the external `omnimarket`
+rollout to be present and reachable. `PrPolishDispatchAdapter` lives in
+`omnimarket` (not in this repo) and is the entry point that drives the
+authoritative execution path below.
+
+Treat the authoritative execution path as:
+
+1. `PrPolishDispatchAdapter` (in `omnimarket.nodes.node_pr_polish`) dispatches `python -m omnimarket.nodes.node_pr_polish`
+2. `node_pr_polish` resolves the PR worktree, verifies branch alignment, and invokes `/onex:pr_polish <pr> --no-push`
+3. this skill workflow performs the conflict/review/local-review loop
+4. `node_pr_polish` then owns CodeRabbit triage, pre-push pre-commit, `git push`, post-push SHA verification, and auto-merge arming
+
+So the prompt workflow still owns the phase bodies, but it no longer owns the
+live branch mutation surface. The node is now the repo-aware wrapper that makes
+the workflow real and performs the final repo-side effects itself.
