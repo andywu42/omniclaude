@@ -4,7 +4,7 @@
 
 Validates that the platform_readiness skill contains no inline probe
 aggregation and dispatches directly to node_platform_readiness via
-`onex run-node`.
+the manifest-canonical onex run-node path.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ class TestPlatformReadinessSkillMd:
         fm = yaml.safe_load(content.split("---", 2)[1])
         arg_names = [a["name"] for a in fm["args"]]
         assert "--json" in arg_names
-        assert "--dimension" in arg_names
+        assert "--dimension" not in arg_names
 
     def test_skill_md_not_deprecated(self) -> None:
         content = (SKILL_DIR / "SKILL.md").read_text()
@@ -67,7 +67,7 @@ class TestPlatformReadinessSkillMd:
 
     def test_skill_md_has_dispatch_command(self) -> None:
         content = (SKILL_DIR / "SKILL.md").read_text()
-        assert "onex run-node node_platform_readiness" in content
+        assert "uv run onex run-node node_platform_readiness" in content
 
     def test_skill_md_declares_skill_routing_error(self) -> None:
         content = (SKILL_DIR / "SKILL.md").read_text()
@@ -88,7 +88,7 @@ class TestPlatformReadinessPromptMd:
 
     def test_prompt_md_dispatches_to_node(self) -> None:
         content = (SKILL_DIR / "prompt.md").read_text()
-        assert "onex run-node node_platform_readiness" in content
+        assert "uv run onex run-node node_platform_readiness" in content
 
     def test_prompt_md_no_inline_probe_aggregation(self) -> None:
         """Prompt must not contain inline probe aggregation across dimensions."""
@@ -116,11 +116,13 @@ class TestPlatformReadinessPromptMd:
         assert "from openai" not in content
 
     def test_prompt_md_single_dispatch(self) -> None:
-        """A4 invariant: exactly one onex run-node dispatch."""
+        """A4 invariant: exactly one manifest-canonical dispatch."""
         content = (SKILL_DIR / "prompt.md").read_text()
-        matches = re.findall(r"onex\s+run-node\s+node_platform_readiness", content)
+        matches = re.findall(
+            r"uv\s+run\s+onex\s+run-node\s+node_platform_readiness", content
+        )
         assert len(matches) == 1, (
-            f"Expected exactly 1 onex run-node dispatch, found {len(matches)}"
+            f"Expected exactly 1 run-node dispatch, found {len(matches)}"
         )
 
     def test_prompt_md_surfaces_skill_routing_error(self) -> None:
@@ -131,7 +133,12 @@ class TestPlatformReadinessPromptMd:
     def test_prompt_md_preserves_cli_args(self) -> None:
         content = (SKILL_DIR / "prompt.md").read_text()
         assert "--json" in content
-        assert "--dimension" in content
+        assert "--dimension" not in content
+
+    def test_prompt_md_uses_run_node_input_envelope(self) -> None:
+        content = (SKILL_DIR / "prompt.md").read_text()
+        assert "onex run-node node_platform_readiness --input '{}'" in content
+        assert "onex run-node node_platform_readiness -- " not in content
 
     def test_prompt_md_no_subprocess_wrappers(self) -> None:
         """A4 invariant: no subprocess.run / Popen / shell helpers."""
