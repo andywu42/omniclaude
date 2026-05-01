@@ -82,6 +82,10 @@ if ! source "${HOOKS_DIR}/scripts/common.sh"; then
     echo "$TOOL_INFO"
     exit 0
 fi
+if ! onex_hook_gate HOOK_IDLE_NOTIFICATION_RATELIMIT; then
+    echo "$TOOL_INFO"
+    exit 0
+fi
 if [[ -z "${PYTHON_CMD:-}" ]]; then
     echo "FATAL: no valid Python interpreter found" >&2
     exit 1

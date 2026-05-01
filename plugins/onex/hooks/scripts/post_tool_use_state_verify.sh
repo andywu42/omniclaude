@@ -8,6 +8,8 @@
 # Extend COMMAND_PORT_MAP incrementally; do not generalize to all processes.
 
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/hook-gate.sh" 2>/dev/null || true
+onex_hook_gate POST_TOOL_STATE_VERIFY || exit 0
 
 # --- Lite mode guard [OMN-5398] ---
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

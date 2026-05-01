@@ -19,10 +19,8 @@ if [[ "${OMNICLAUDE_HOOKS_DISABLED:-0}" == "1" ]]; then
     cat  # drain stdin
     exit 0
 fi
-if [[ "${OMNICLAUDE_HOOK_RUFF_FIX:-1}" == "0" ]]; then
-    cat  # drain stdin
-    exit 0
-fi
+source "$(dirname "${BASH_SOURCE[0]}")/scripts/hook-gate.sh" 2>/dev/null || true
+onex_hook_gate RUFF_FIX || exit 0
 
 # -----------------------------------------------------------------------
 # Read stdin (Claude Code PostToolUse JSON)

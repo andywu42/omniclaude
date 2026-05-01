@@ -20,10 +20,8 @@ if [[ "${OMNICLAUDE_HOOKS_DISABLED:-0}" == "1" ]]; then
     cat  # drain stdin
     exit 0
 fi
-if [[ "${OMNICLAUDE_HOOK_TEST_REMINDER:-1}" == "0" ]]; then
-    cat  # drain stdin
-    exit 0
-fi
+source "$(dirname "${BASH_SOURCE[0]}")/hook-gate.sh" 2>/dev/null || true
+onex_hook_gate TEST_REMINDER || exit 0
 
 # -----------------------------------------------------------------------
 # Repo-guard: the reminder injects OmniNode-flavored pytest conventions.
