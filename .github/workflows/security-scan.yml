@@ -22,15 +22,13 @@ jobs:
   # ============================================================================
   dependency-scan:
     name: Dependency Security Scan
-    # OMNINODE_SELF_HOSTED_RUNS_ON_V1 — do not edit inline; update plan + all occurrences together
+    # OMNI_RUNNER_SELECTOR_V1 - trusted CI defaults to self-hosted omnibase-ci; public forks default to ubuntu-latest
     runs-on: >-
       ${{
-        (vars.USE_SELF_HOSTED_RUNNERS == 'true' &&
-         (github.event_name == 'push' ||
-          github.event_name == 'workflow_dispatch' ||
-          github.event_name == 'schedule'))
-        && fromJSON('["self-hosted","omnibase-ci"]')
-        || fromJSON('["ubuntu-latest"]')
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
       }}
     steps:
       - name: Checkout code
@@ -45,6 +43,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Export requirements
+        working-directory: ${{ github.workspace }}
         run: uv export --format requirements-txt --no-hashes --output-file requirements.txt
 
       - name: Run Dependency Review
@@ -52,6 +51,7 @@ jobs:
         if: github.event_name == 'pull_request'
 
       - name: Run Safety Check
+        working-directory: ${{ github.workspace }}
         run: |
           pip install safety
           safety check --file requirements.txt --output json > safety-report.json || true
@@ -69,15 +69,13 @@ jobs:
   # ============================================================================
   secret-scan:
     name: Secret Scanning
-    # OMNINODE_SELF_HOSTED_RUNS_ON_V1 — do not edit inline; update plan + all occurrences together
+    # OMNI_RUNNER_SELECTOR_V1 - trusted CI defaults to self-hosted omnibase-ci; public forks default to ubuntu-latest
     runs-on: >-
       ${{
-        (vars.USE_SELF_HOSTED_RUNNERS == 'true' &&
-         (github.event_name == 'push' ||
-          github.event_name == 'workflow_dispatch' ||
-          github.event_name == 'schedule'))
-        && fromJSON('["self-hosted","omnibase-ci"]')
-        || fromJSON('["ubuntu-latest"]')
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
       }}
     steps:
       - name: Checkout code
@@ -106,15 +104,13 @@ jobs:
   # ============================================================================
   codeql:
     name: CodeQL Security Analysis
-    # OMNINODE_SELF_HOSTED_RUNS_ON_V1 — do not edit inline; update plan + all occurrences together
+    # OMNI_RUNNER_SELECTOR_V1 - trusted CI defaults to self-hosted omnibase-ci; public forks default to ubuntu-latest
     runs-on: >-
       ${{
-        (vars.USE_SELF_HOSTED_RUNNERS == 'true' &&
-         (github.event_name == 'push' ||
-          github.event_name == 'workflow_dispatch' ||
-          github.event_name == 'schedule'))
-        && fromJSON('["self-hosted","omnibase-ci"]')
-        || fromJSON('["ubuntu-latest"]')
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
       }}
     permissions:
       actions: read
@@ -149,15 +145,13 @@ jobs:
   # ============================================================================
   container-scan:
     name: Container Security Scan
-    # OMNINODE_SELF_HOSTED_RUNS_ON_V1 — do not edit inline; update plan + all occurrences together
+    # OMNI_RUNNER_SELECTOR_V1 - trusted CI defaults to self-hosted omnibase-ci; public forks default to ubuntu-latest
     runs-on: >-
       ${{
-        (vars.USE_SELF_HOSTED_RUNNERS == 'true' &&
-         (github.event_name == 'push' ||
-          github.event_name == 'workflow_dispatch' ||
-          github.event_name == 'schedule'))
-        && fromJSON('["self-hosted","omnibase-ci"]')
-        || fromJSON('["ubuntu-latest"]')
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
       }}
     permissions:
       contents: read
@@ -167,6 +161,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Build Docker image
+        working-directory: ${{ github.workspace }}
         run: docker build -f deployment/Dockerfile -t omniclaude:scan .
 
       - name: Run Trivy vulnerability scanner
@@ -192,6 +187,7 @@ jobs:
 
       - name: Run Dockle (Docker image linter)
         continue-on-error: true
+        working-directory: ${{ github.workspace }}
         run: |
           VERSION=$(curl --silent "https://api.github.com/repos/goodwithtech/dockle/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
           curl -L -o dockle.tar.gz https://github.com/goodwithtech/dockle/releases/download/v${VERSION}/dockle_${VERSION}_Linux-64bit.tar.gz
@@ -203,15 +199,13 @@ jobs:
   # ============================================================================
   iac-scan:
     name: IaC Security Scan
-    # OMNINODE_SELF_HOSTED_RUNS_ON_V1 — do not edit inline; update plan + all occurrences together
+    # OMNI_RUNNER_SELECTOR_V1 - trusted CI defaults to self-hosted omnibase-ci; public forks default to ubuntu-latest
     runs-on: >-
       ${{
-        (vars.USE_SELF_HOSTED_RUNNERS == 'true' &&
-         (github.event_name == 'push' ||
-          github.event_name == 'workflow_dispatch' ||
-          github.event_name == 'schedule'))
-        && fromJSON('["self-hosted","omnibase-ci"]')
-        || fromJSON('["ubuntu-latest"]')
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
       }}
     permissions:
       contents: read

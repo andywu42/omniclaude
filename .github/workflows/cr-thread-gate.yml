@@ -27,7 +27,13 @@ on:
 jobs:
   gate:
     name: CodeRabbit Thread Check
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
+      }}
     steps:
       - name: Checkout omniclaude scripts
         uses: actions/checkout@v6
@@ -39,6 +45,7 @@ jobs:
 
       - name: Resolve repo name
         id: resolve-repo
+        working-directory: ${{ github.workspace }}
         run: |
           REPO="${{ inputs.repo }}"
           [ -z "$REPO" ] && REPO="${{ github.repository }}"
@@ -47,6 +54,7 @@ jobs:
 
       - name: Resolve PR number
         id: resolve-pr
+        working-directory: ${{ github.workspace }}
         run: |
           PR="${{ inputs.pr-number }}"
           if [ -z "$PR" ]; then
@@ -60,6 +68,7 @@ jobs:
       - name: Check unresolved CodeRabbit threads
         env:
           GH_TOKEN: ${{ secrets.CROSS_REPO_PAT || secrets.github-token || secrets.GITHUB_TOKEN }}
+        working-directory: ${{ github.workspace }}
         run: |
           PR="${{ steps.resolve-pr.outputs.pr }}"
           if [ -z "$PR" ] || [ "$PR" = "0" ]; then

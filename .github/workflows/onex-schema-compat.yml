@@ -33,15 +33,13 @@ env:
 jobs:
   schema-compat:
     name: ONEX Change Control Schema Compatibility
-    # OMNINODE_SELF_HOSTED_RUNS_ON_V1 — do not edit inline; update plan + all occurrences together
+    # OMNI_RUNNER_SELECTOR_V1 - trusted CI defaults to self-hosted omnibase-ci; public forks default to ubuntu-latest
     runs-on: >-
       ${{
-        (vars.USE_SELF_HOSTED_RUNNERS == 'true' &&
-         (github.event_name == 'push' ||
-          github.event_name == 'workflow_dispatch' ||
-          github.event_name == 'schedule'))
-        && fromJSON('["self-hosted","omnibase-ci"]')
-        || fromJSON('["ubuntu-latest"]')
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
       }}
     timeout-minutes: 10
     # Only run on PRs from the same repo -- forks lack access to private onex_change_control
@@ -68,15 +66,18 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Load cached venv
-        uses: actions/cache@v5
+        if: ${{ vars.OMNI_ENABLE_VENV_CACHE_RESTORE == 'true' }}
+        uses: actions/cache/restore@v5
         with:
           path: .venv
           key: uv-schema-compat-${{ runner.os }}-${{ hashFiles('uv.lock') }}
 
       - name: Install omniclaude dependencies
+        working-directory: ${{ github.workspace }}
         run: uv sync --frozen
 
       - name: Install onex_change_control schema validator
+        working-directory: ${{ github.workspace }}
         run: |
           # Install from local checkout to get validate-yaml CLI and schema models.
           # uv handles the poetry-core PEP 517 build automatically.
@@ -84,6 +85,7 @@ jobs:
 
       - name: Find schema artifact files
         id: find-artifacts
+        working-directory: ${{ github.workspace }}
         run: |
           set -e
           # Search only in directories explicitly reserved for schema artifacts.
@@ -126,6 +128,7 @@ jobs:
 
       - name: Validate schema artifacts
         if: steps.find-artifacts.outputs.found == 'true'
+        working-directory: ${{ github.workspace }}
         run: |
           # Validate each artifact against the current onex_change_control Pydantic models.
           # validate-yaml auto-detects ModelTicketContract vs ModelDayClose by path/content.
@@ -136,6 +139,7 @@ jobs:
           done <<< "${{ steps.find-artifacts.outputs.files }}"
 
       - name: Check schema version compatibility
+        working-directory: ${{ github.workspace }}
         run: |
           # Extract the onex_change_control package version (canonical schema version).
           OCC_VERSION=$(uv run python3 -c "

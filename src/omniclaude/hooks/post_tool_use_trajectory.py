@@ -61,7 +61,7 @@ def _load_detectors() -> Any:  # ONEX_EXCLUDE: any_type - lazy-loaded detector c
 
 def _load_escalation_tracker(
     session_id: str,
-) -> Any:  # ONEX_EXCLUDE: any_type - lazy-loaded
+) -> Any:  # ONEX_EXCLUDE: any_type - lazy-loaded EscalationTracker
     from omnibase_core.agents.prm_escalation import EscalationTracker
 
     return EscalationTracker(session_id=session_id)
@@ -156,7 +156,7 @@ def _escalate_matches(
     tracker = _load_escalation_tracker(session_id)
     results = []
     for match in matches:
-        result = tracker.process(match, session_id=session_id)
+        result = tracker.process(match)
         results.append(result)
     return results
 

@@ -31,7 +31,13 @@ on:
 jobs:
   scan-skip-tokens:
     name: scan / reject-skip-gate-token
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
+      }}
     timeout-minutes: 5
 
     steps:
@@ -44,6 +50,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
           MERGE_GROUP_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+        working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
 
@@ -88,6 +95,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RESOLVED_BODY_PATH: ${{ steps.resolve-body.outputs.body_path }}
+        working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
 

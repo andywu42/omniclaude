@@ -35,14 +35,20 @@ jobs:
   close-linear-ticket:
     name: Close Linear Ticket
     if: github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
-
+    runs-on: >-
+      ${{
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
+      }}
     steps:
       - name: Extract ticket ID from branch name
         id: extract
         env:
           BRANCH: ${{ github.event.pull_request.head.ref }}
         shell: bash
+        working-directory: ${{ github.workspace }}
         run: |
           echo "Branch: $BRANCH"
 
@@ -78,6 +84,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         shell: bash
+        working-directory: ${{ github.workspace }}
         run: |
           if [ -z "$LINEAR_API_KEY" ]; then
             echo "LINEAR_API_KEY is not set — skipping Linear ticket close"
