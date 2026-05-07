@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Delegation routing package for omniclaude."""
 
+from omniclaude.delegation.daemon_fallback import is_daemon_available
 from omniclaude.delegation.evidence_bundle import (
     EnumBundleArtifact,
     EvidenceBundleWriter,
@@ -24,10 +25,17 @@ from omniclaude.delegation.sensitivity_gate import (
     ModelSensitivityResult,
     SensitivityGate,
 )
+from omniclaude.delegation.transport import (
+    DelegationTransportSelector,
+    EnumDelegationTransport,
+    get_delegation_transport,
+)
 
 __all__: list[str] = [
     "DelegationRunner",
+    "DelegationTransportSelector",
     "EnumBundleArtifact",
+    "EnumDelegationTransport",
     "EnumSensitivityPolicy",
     "EvidenceBundleWriter",
     "ModelBifrostResponse",
@@ -41,6 +49,8 @@ __all__: list[str] = [
     "ModelSensitivityResult",
     "SavingsCalculator",
     "SensitivityGate",
+    "get_delegation_transport",
     "hash_prompt",
+    "is_daemon_available",
     "new_bundle_id",
 ]
