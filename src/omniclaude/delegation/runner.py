@@ -41,6 +41,7 @@ import logging
 import os
 import time
 from collections.abc import Callable
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -117,6 +118,84 @@ class ModelBifrostRunnerResult(BaseModel):
         default=0, ge=0, description="Backends attempted before success"
     )
     error_message: str = Field(default="", description="Structured error on failure")
+
+
+class ModelDelegationBackendContract(BaseModel):
+    """Backend entry from the packaged delegation routing contract."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    backend_id: str
+    base_url_env: str | None = None
+    model_name: str
+    tier: str
+    timeout_ms: int = Field(default=30000, gt=0)
+    capabilities: tuple[str, ...] = ()
+
+
+class ModelDelegationFallbackPolicyContract(BaseModel):
+    """Fallback policy entry from the packaged delegation routing contract."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    action: str
+    max_retries: int = Field(default=0, ge=0)
+    on_exhaust: str
+
+
+class ModelDelegationRoutingRuleContract(BaseModel):
+    """Routing rule entry from the packaged delegation routing contract."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    rule_id: UUID
+    priority: int
+    task_class: str
+    task_class_contract_version: str
+    backend_policy_version: str
+    match_operation_types: tuple[str, ...] = ()
+    match_capabilities: tuple[str, ...] = ()
+    latency_sla_ms: int | None = Field(default=None, gt=0)
+    cost_ceiling_usd_per_1k_tokens: float | None = Field(default=None, gt=0)  # noqa: secrets
+    backend_ids: tuple[str, ...]
+    fallback_policy: ModelDelegationFallbackPolicyContract
+    shadow_policy_id: UUID
+
+
+class ModelDelegationFailoverContract(BaseModel):
+    """Failover settings from the packaged delegation routing contract."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_attempts: int = Field(default=3, gt=0)
+    backoff_base_ms: int = Field(default=500, ge=0)
+
+
+class ModelDelegationCircuitBreakerContract(BaseModel):
+    """Circuit breaker settings from the packaged delegation routing contract."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    failure_threshold: int = Field(default=5, gt=0)
+    window_seconds: int = Field(default=30, gt=0)
+
+
+class ModelDelegationBifrostContract(BaseModel):
+    """Packaged delegation routing contract consumed by DelegationRunner."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    config_version: str
+    schema_version: str
+    backends: tuple[ModelDelegationBackendContract, ...]
+    routing_rules: tuple[ModelDelegationRoutingRuleContract, ...]
+    default_backends: tuple[str, ...] = ()
+    failover: ModelDelegationFailoverContract = Field(
+        default_factory=ModelDelegationFailoverContract
+    )
+    circuit_breaker: ModelDelegationCircuitBreakerContract = Field(
+        default_factory=ModelDelegationCircuitBreakerContract
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -541,11 +620,11 @@ def _delegation_tenant_id() -> UUID:
 
 
 def _build_env_config() -> object | None:  # ModelBifrostConfig | None
-    """Build a minimal ModelBifrostConfig from environment variables.
+    """Build a ModelBifrostConfig from the bifrost_delegation.yaml contract.
 
-    Reads the same env vars as ``select_backend()`` in
-    ``handler_delegation_dispatch.py``. Returns None if no endpoints
-    are configured.
+    Loads the delegation routing contract and converts it to the gateway's
+    ModelBifrostConfig, resolving backend URLs from env vars declared in the
+    contract (base_url_env field). Backends whose env var is unset are skipped.
     """
     try:
         from omnibase_infra.nodes.node_llm_inference_effect.handlers.bifrost.model_bifrost_config import (
@@ -556,67 +635,73 @@ def _build_env_config() -> object | None:  # ModelBifrostConfig | None
             ModelBifrostRoutingRule,
         )
     except (ImportError, SyntaxError):
-        # SyntaxError guards against broken/partial omnibase_infra installs
-        # (e.g. merge-conflict markers in the canonical clone during development).
         return None
 
-    _ENDPOINT_ENV = [
-        (
-            "LLM_CODER_FAST_URL",
-            "LLM_CODER_FAST_MODEL_NAME",
-            "Qwen/Qwen3-14B-AWQ",
-            "coder-fast",
-        ),
-        (
-            "LLM_CODER_URL",
-            "LLM_CODER_MODEL_NAME",
-            "Qwen3-Coder-30B-A3B-Instruct",
-            "coder",
-        ),
-        (
-            "LLM_DEEPSEEK_R1_URL",
-            "LLM_DEEPSEEK_R1_MODEL_NAME",
-            "DeepSeek-R1-Distill",
-            "deepseek-r1",
-        ),
-        ("LLM_GLM_URL", "LLM_GLM_MODEL_NAME", "glm-4.5", "glm"),
-    ]
+    local_config_path = Path(__file__).parent / "bifrost_delegation.yaml"
+    if not local_config_path.exists():
+        logger.warning("bifrost_delegation.yaml not found, delegation disabled")
+        return None
+
+    try:
+        import yaml
+
+        raw_config: object = yaml.safe_load(local_config_path.read_text())
+        delegation_config = ModelDelegationBifrostContract.model_validate(raw_config)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        logger.warning("bifrost_delegation.yaml invalid: %s", exc)
+        return None
 
     backends: dict[str, ModelBifrostBackendConfig] = {}
-    for url_var, model_var, default_model, backend_id in _ENDPOINT_ENV:
-        url = os.environ.get(url_var, "").strip()
-        if not url:
+    for backend in delegation_config.backends:
+        if backend.base_url_env:
+            url = os.environ.get(backend.base_url_env, "").strip()
+            if not url:
+                continue
+        else:
             continue
-        model_name = os.environ.get(model_var, default_model).strip() or default_model
-        backends[backend_id] = ModelBifrostBackendConfig(
-            backend_id=backend_id,
+        backends[backend.backend_id] = ModelBifrostBackendConfig(
+            backend_id=backend.backend_id,
             base_url=url,
-            model_name=model_name,
+            model_name=backend.model_name,
+            timeout_ms=backend.timeout_ms,
         )
 
     if not backends:
         return None
 
-    priority_order = tuple(backends.keys())
-    # Stable rule_id: deterministic UUID based on the sorted backend_id set
-    # so that the same env config always produces the same rule_id in audit logs.
-    import uuid as _uuid_mod
+    rules: list[ModelBifrostRoutingRule] = []
+    for rule in delegation_config.routing_rules:
+        available_ids = tuple(bid for bid in rule.backend_ids if bid in backends)
+        if not available_ids:
+            continue
+        rules.append(
+            ModelBifrostRoutingRule(
+                rule_id=rule.rule_id,
+                priority=rule.priority,
+                backend_ids=available_ids,
+            )
+        )
 
-    rule_id = _uuid_mod.uuid5(
-        _uuid_mod.NAMESPACE_OID,
-        "delegation-env-rule:" + ",".join(sorted(priority_order)),
-    )
-    rule = ModelBifrostRoutingRule(
-        rule_id=rule_id,
-        priority=100,
-        backend_ids=priority_order,
+    default_ids = tuple(
+        bid for bid in delegation_config.default_backends if bid in backends
     )
 
     return ModelBifrostConfig(
         backends=backends,
-        routing_rules=(rule,),
-        default_backends=priority_order,
-        failover_attempts=len(backends),
+        routing_rules=tuple(rules)
+        if rules
+        else (
+            ModelBifrostRoutingRule(
+                rule_id=uuid4(),
+                priority=100,
+                backend_ids=tuple(backends.keys()),
+            ),
+        ),
+        default_backends=default_ids or tuple(backends.keys()),
+        failover_attempts=delegation_config.failover.max_attempts,
+        failover_backoff_base_ms=delegation_config.failover.backoff_base_ms,
+        circuit_breaker_failure_threshold=delegation_config.circuit_breaker.failure_threshold,
+        circuit_breaker_window_seconds=delegation_config.circuit_breaker.window_seconds,
     )
 
 
@@ -645,6 +730,11 @@ def _extract_response_text(inference_response: object) -> str:
             text = getattr(first, "text", None)
             if text:
                 return str(text)
+
+    # ModelLlmInferenceResponse uses generated_text
+    generated = getattr(inference_response, "generated_text", None)
+    if generated:
+        return str(generated)
 
     # Direct content attribute on the response itself
     content = getattr(inference_response, "content", None)
