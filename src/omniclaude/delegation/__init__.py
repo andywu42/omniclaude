@@ -14,6 +14,11 @@ from omniclaude.delegation.evidence_bundle import (
     hash_prompt,
     new_bundle_id,
 )
+from omniclaude.delegation.inprocess_runner import (
+    DelegationRunnerError,
+    EnumDelegationTaskType,
+    InProcessDelegationRunner,
+)
 from omniclaude.delegation.runner import (
     DelegationRunner,
     ModelBifrostRunnerResult,
@@ -34,10 +39,13 @@ from omniclaude.delegation.transport import (
 __all__: list[str] = [
     "DelegationRunner",
     "DelegationTransportSelector",
+    "DelegationRunnerError",
     "EnumBundleArtifact",
     "EnumDelegationTransport",
+    "EnumDelegationTaskType",
     "EnumSensitivityPolicy",
     "EvidenceBundleWriter",
+    "InProcessDelegationRunner",
     "ModelBifrostResponse",
     "ModelBifrostRunnerResult",
     "ModelBundleReceipt",

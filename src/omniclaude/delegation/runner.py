@@ -25,6 +25,9 @@ Audit events:
     Callers wire this to their Kafka publisher to satisfy the observability
     requirement in OMN-10636.
 
+For the in-process pipeline runner (used when the runtime socket / Kafka path
+is unavailable), see :mod:`omniclaude.delegation.inprocess_runner`.
+
 Related:
     - OMN-10636: Wire DelegationRunner → Bifrost gateway
     - OMN-2736: Adopt bifrost as LLM gateway handler
@@ -651,7 +654,7 @@ def _extract_response_text(inference_response: object) -> str:
     return ""
 
 
-__all__ = [
+__all__: list[str] = [
     "DelegationRunner",
     "ModelBifrostRunnerResult",
     "ModelDelegationAuditEvent",

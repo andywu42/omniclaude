@@ -80,7 +80,9 @@ def delegate_run_with_runner(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
 
     fake_runner_instance = FakeDelegationRunner()
     monkeypatch.setattr(imported, "_HAS_DELEGATION_RUNNER", True)
-    monkeypatch.setattr(imported, "DelegationRunner", lambda: fake_runner_instance)
+    monkeypatch.setattr(
+        imported, "InProcessDelegationRunner", lambda: fake_runner_instance
+    )
     return imported
 
 
@@ -91,7 +93,7 @@ def delegate_run_no_runner(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
 
     imported = importlib.reload(delegate_run_module)
     monkeypatch.setattr(imported, "_HAS_DELEGATION_RUNNER", False)
-    monkeypatch.setattr(imported, "DelegationRunner", None)
+    monkeypatch.setattr(imported, "InProcessDelegationRunner", None)
     return imported
 
 
@@ -191,7 +193,7 @@ class TestDelegateInprocessFallback:
         )
 
         assert result.get("success") is False
-        assert "DelegationRunner unavailable" in result["error"]
+        assert "InProcessDelegationRunner unavailable" in result["error"]
 
     def test_correlation_id_propagates_in_inprocess_path(
         self,
@@ -234,7 +236,7 @@ class TestDelegateInprocessFallback:
             return r
 
         monkeypatch.setattr(
-            delegate_run_with_runner, "DelegationRunner", _failing_runner
+            delegate_run_with_runner, "InProcessDelegationRunner", _failing_runner
         )
 
         result = delegate_run_with_runner.classify_and_publish(
@@ -245,3 +247,50 @@ class TestDelegateInprocessFallback:
         assert result.get("success") is False
         assert "routing failed" in result["error"]
         assert result["path"] == "inprocess"
+
+    def test_evidence_bundle_written_when_state_dir_set(
+        self,
+        delegate_run_with_runner: ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """ONEX_STATE_DIR set → fallback writes the 5-artifact evidence bundle."""
+        if not getattr(delegate_run_with_runner, "_HAS_EVIDENCE_BUNDLE", False):
+            pytest.skip("evidence_bundle module not importable in this venv")
+
+        monkeypatch.setenv("ONEX_STATE_DIR", str(tmp_path))
+
+        result = delegate_run_with_runner.classify_and_publish(
+            prompt="write unit tests for handler_event_emitter.py",
+            force_local=True,
+        )
+
+        assert result.get("success") is True
+        bundle_path = result.get("evidence_bundle_path")
+        assert bundle_path is not None, f"expected bundle path, got result={result}"
+        bundle_dir = Path(bundle_path)
+        assert bundle_dir.is_dir()
+        names = {p.name for p in bundle_dir.iterdir()}
+        assert names == {
+            "bifrost_response.json",
+            "cost_event.json",
+            "quality_gate_result.json",
+            "receipt.json",
+            "run_manifest.json",
+        }, f"unexpected artifacts: {names}"
+
+    def test_no_bundle_when_state_dir_unset(
+        self,
+        delegate_run_with_runner: ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ONEX_STATE_DIR unset → fallback returns evidence_bundle_path=None."""
+        monkeypatch.delenv("ONEX_STATE_DIR", raising=False)
+
+        result = delegate_run_with_runner.classify_and_publish(
+            prompt="write unit tests for handler_event_emitter.py",
+            force_local=True,
+        )
+
+        assert result.get("success") is True
+        assert result.get("evidence_bundle_path") is None

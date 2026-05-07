@@ -69,13 +69,27 @@ except ImportError as exc:
     _RUNTIME_IMPORT_ERROR = exc
 
 try:
-    from omniclaude.delegation.runner import DelegationRunner, DelegationRunnerError
+    from omniclaude.delegation.inprocess_runner import InProcessDelegationRunner
 
     _HAS_DELEGATION_RUNNER = True
 except ImportError:
-    DelegationRunner = None  # type: ignore[assignment,misc]
-    DelegationRunnerError = Exception  # type: ignore[assignment,misc]
+    InProcessDelegationRunner = None  # type: ignore[assignment,misc]
     _HAS_DELEGATION_RUNNER = False
+
+try:
+    from omniclaude.delegation.evidence_bundle import (
+        EvidenceBundleWriter,
+        ModelBifrostResponse,
+        ModelCostEvent,
+        ModelQualityGateArtifact,
+        ModelRunManifest,
+        hash_prompt,
+        new_bundle_id,
+    )
+
+    _HAS_EVIDENCE_BUNDLE = True
+except ImportError:
+    _HAS_EVIDENCE_BUNDLE = False
 
 try:
     from omniclaude.hooks.topics import TopicBase as _TopicBase
@@ -113,6 +127,92 @@ def _runtime_import_error(exc: ImportError) -> dict:
     }
 
 
+def _write_evidence_bundle(
+    *,
+    result: object,
+    prompt: str,
+    started_at: object,
+    completed_at: object,
+) -> str | None:
+    """Write the 5-artifact delegation evidence bundle. Returns bundle dir or None.
+
+    Fail-soft: any error (bundle module missing, ONEX_STATE_DIR unset, write
+    failure) returns None without raising. The user-facing delegation result
+    must not be broken by an evidence-bundle problem.
+    """
+    if not _HAS_EVIDENCE_BUNDLE:
+        return None
+    state_dir = os.environ.get("ONEX_STATE_DIR")
+    if not state_dir:
+        return None
+
+    try:
+        from datetime import UTC, datetime  # noqa: PLC0415
+        from pathlib import Path as _Path  # noqa: PLC0415
+
+        cid = str(result.correlation_id)  # type: ignore[attr-defined]
+        bundle_root = _Path(state_dir) / "delegation" / "bundles"
+        bundle_root.mkdir(parents=True, exist_ok=True)
+
+        manifest = ModelRunManifest(
+            correlation_id=cid,
+            bundle_id=new_bundle_id(),
+            ticket_id=os.environ.get("ONEX_TICKET_ID"),
+            session_id=os.environ.get("CLAUDE_SESSION_ID"),
+            task_type=str(result.task_type),  # type: ignore[attr-defined]
+            prompt_hash=hash_prompt(prompt),
+            started_at=started_at,  # type: ignore[arg-type]
+            completed_at=completed_at,  # type: ignore[arg-type]
+            runner="inprocess",
+        )
+        bifrost = ModelBifrostResponse(
+            correlation_id=cid,
+            backend_selected=str(result.endpoint_url),  # type: ignore[attr-defined]
+            model_used=str(result.model_used),  # type: ignore[attr-defined]
+            latency_ms=int(result.latency_ms),  # type: ignore[attr-defined]
+            prompt_tokens=int(result.prompt_tokens),  # type: ignore[attr-defined]
+            completion_tokens=int(result.completion_tokens),  # type: ignore[attr-defined]
+            total_tokens=int(result.total_tokens),  # type: ignore[attr-defined]
+            response_content=str(result.content),  # type: ignore[attr-defined]
+        )
+        gate = ModelQualityGateArtifact(
+            correlation_id=cid,
+            passed=bool(result.quality_passed),  # type: ignore[attr-defined]
+            quality_score=result.quality_score,  # type: ignore[attr-defined]
+            failure_reasons=(
+                (result.failure_reason,)  # type: ignore[attr-defined]
+                if result.failure_reason  # type: ignore[attr-defined]
+                else ()
+            ),
+            fallback_to_claude=bool(result.fallback_to_claude),  # type: ignore[attr-defined]
+        )
+        cost = ModelCostEvent(
+            correlation_id=cid,
+            session_id=os.environ.get("CLAUDE_SESSION_ID"),
+            model_local=str(result.model_used),  # type: ignore[attr-defined]
+            baseline_model="claude-sonnet-4-6",
+            local_cost_usd=None,
+            cloud_cost_usd=None,
+            savings_usd=None,
+            savings_method="not_computed_inprocess",
+            token_provenance="vllm_usage_block",  # secret-ok: provenance label, not a secret  # noqa: S106
+            pricing_manifest_version="unset",
+            prompt_tokens=int(result.prompt_tokens),  # type: ignore[attr-defined]
+            completion_tokens=int(result.completion_tokens),  # type: ignore[attr-defined]
+        )
+        writer = EvidenceBundleWriter(root_dir=bundle_root)
+        writer.write(
+            manifest=manifest,
+            bifrost_response=bifrost,
+            quality_gate=gate,
+            cost_event=cost,
+            issued_at=datetime.now(UTC),
+        )
+        return str(bundle_root / cid)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _inprocess_fallback(
     *,
     prompt: str,
@@ -121,22 +221,26 @@ def _inprocess_fallback(
     source_file: str | None,
     max_tokens: int,
 ) -> dict:
-    """Run delegation pipeline in-process via DelegationRunner.
+    """Run delegation pipeline in-process via InProcessDelegationRunner.
 
     Used when runtime socket is unavailable or --local is requested.
     """
-    if not _HAS_DELEGATION_RUNNER or DelegationRunner is None:
+    if not _HAS_DELEGATION_RUNNER or InProcessDelegationRunner is None:
         return {
             "success": False,
             "error": (
-                "DelegationRunner unavailable - omniclaude.delegation.runner "
-                "not importable (branch jonah/omn-10610 may not be merged)"
+                "InProcessDelegationRunner unavailable - "
+                "omniclaude.delegation.runner not importable "
+                "(branch jonah/omn-10610 may not be merged)"
             ),
             "correlation_id": correlation_id,
         }
 
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    started_at = datetime.now(UTC)
     try:
-        runner = DelegationRunner()
+        runner = InProcessDelegationRunner()
         result = runner.run(
             task_type=intent_value,
             prompt=prompt,
@@ -144,13 +248,21 @@ def _inprocess_fallback(
             source_session_id=os.environ.get("CLAUDE_SESSION_ID"),
             max_tokens=max_tokens,
         )
-    except DelegationRunnerError as exc:
+    except Exception as exc:  # noqa: BLE001
         return {
             "success": False,
             "error": str(exc),
             "correlation_id": correlation_id,
             "path": "inprocess",
         }
+    completed_at = datetime.now(UTC)
+
+    bundle_path = _write_evidence_bundle(
+        result=result,
+        prompt=prompt,
+        started_at=started_at,
+        completed_at=completed_at,
+    )
 
     return {
         "success": True,
@@ -167,6 +279,7 @@ def _inprocess_fallback(
         "total_tokens": result.total_tokens,
         "fallback_to_claude": result.fallback_to_claude,
         "failure_reason": result.failure_reason,
+        "evidence_bundle_path": bundle_path,
         "path": "inprocess",
     }
 
