@@ -18,12 +18,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
 
-_MIGRATION_SQL = (
-    Path(__file__).parent / "migrations" / "001_create_delegation_tables.sql"
-)
+_MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+_MIGRATION_SQL = _MIGRATIONS_DIR / "001_create_delegation_tables.sql"
+_MIGRATION_002_SQL = _MIGRATIONS_DIR / "002_align_with_projection_handler.sql"
 _DEFAULT_DB_PATH = Path.home() / ".omninode" / "delegation" / "delegation.sqlite"
-_MIGRATION_VERSION = "001"
-_MIGRATION_DESCRIPTION = "Create delegation projection tables"
+_MIGRATION_VERSION = "002"
+_MIGRATION_DESCRIPTION = "Align with projection handler schema"
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +119,17 @@ class ModelDelegationEventRow(BaseModel):
     input_redaction_policy: str = "hash_only"
     contract_version: str = "v1"
     created_at: float = 0.0
+    timestamp: str | None = None
+    delegated_by: str = ""
+    quality_gates_checked: int = 0
+    quality_gates_failed: int = 0
+    delegation_latency_ms: int | None = None
+    repo: str | None = None
+    is_shadow: int = 0
+    llm_call_id: str | None = None
+    tokens_input: int = 0
+    tokens_output: int = 0
+    cost_savings_usd: float = 0.0
 
 
 class ModelSavingsSummary(BaseModel):
@@ -161,13 +172,37 @@ class SQLiteProjectionAdapter:
     # ------------------------------------------------------------------
 
     def _apply_migrations(self) -> None:
-        ddl = _MIGRATION_SQL.read_text()
         with self._lock:
-            self._conn.executescript(ddl)
+            self._conn.executescript(_MIGRATION_SQL.read_text())
             self._conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) VALUES (?, ?, ?)",
-                (_MIGRATION_VERSION, time.time(), _MIGRATION_DESCRIPTION),
+                ("001", time.time(), "Create delegation projection tables"),
             )
+            applied = {
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT version FROM schema_migrations"
+                ).fetchall()
+            }
+            if "002" not in applied:
+                migration_sql = "\n".join(
+                    line
+                    for line in _MIGRATION_002_SQL.read_text().splitlines()
+                    if not line.lstrip().startswith("--")
+                )
+                for stmt in migration_sql.strip().split(";"):
+                    stmt = stmt.strip()
+                    if not stmt:
+                        continue
+                    try:
+                        self._conn.execute(stmt)
+                    except sqlite3.OperationalError as exc:
+                        if "duplicate column" not in str(exc):
+                            raise
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) VALUES (?, ?, ?)",
+                    ("002", time.time(), _MIGRATION_DESCRIPTION),
+                )
             self._conn.commit()
         logger.debug("Ensured migration %s is applied", _MIGRATION_VERSION)
 
@@ -408,6 +443,122 @@ class SQLiteProjectionAdapter:
                 "SELECT version FROM schema_migrations ORDER BY applied_at ASC"
             ).fetchall()
         return [r["version"] for r in rows]
+
+    _ALLOWED_TABLES: dict[str, set[str]] = {
+        "delegation_events": {
+            "id",
+            "correlation_id",
+            "session_id",
+            "tool_use_id",
+            "hook_name",
+            "task_type",
+            "delegated_to",
+            "model_name",
+            "quality_gate_passed",
+            "quality_gate_detail",
+            "latency_ms",
+            "input_hash",
+            "input_redaction_policy",
+            "contract_version",
+            "created_at",
+            "timestamp",
+            "delegated_by",
+            "quality_gates_checked",
+            "quality_gates_failed",
+            "delegation_latency_ms",
+            "repo",
+            "is_shadow",
+            "llm_call_id",
+            "tokens_input",
+            "tokens_output",
+            "cost_savings_usd",
+        },
+    }
+
+    _DELEGATION_EVENTS_DEFAULTS: dict[str, object] = {
+        "created_at": 0.0,
+        "quality_gates_checked": 0,
+        "quality_gates_failed": 0,
+        "delegation_latency_ms": None,
+        "is_shadow": 0,
+        "tokens_input": 0,
+        "tokens_output": 0,
+        "cost_savings_usd": 0.0,
+        "delegated_by": "",
+        "quality_gate_passed": 0,
+        "task_type": "",
+        "delegated_to": "",
+        "model_name": "",
+        "input_redaction_policy": "hash_only",
+        "contract_version": "v1",
+    }
+
+    def upsert(
+        self,
+        table: str,
+        conflict_key: str,
+        row: dict[str, object],
+    ) -> bool:
+        """Generic upsert satisfying ProtocolProjectionDatabaseSync."""
+        allowed_cols = self._ALLOWED_TABLES.get(table)
+        if allowed_cols is None:
+            raise ValueError(f"Unsupported table: {table!r}")
+        if conflict_key not in allowed_cols:
+            raise ValueError(
+                f"Unsupported conflict key {conflict_key!r} for table {table!r}"
+            )
+        invalid = [c for c in row if c not in allowed_cols]
+        if invalid:
+            raise ValueError(f"Unsupported columns for {table!r}: {invalid}")
+        row = dict(row)
+        if table == "delegation_events":
+            if "created_at" not in row:
+                row["created_at"] = time.time()
+            for col, default in self._DELEGATION_EVENTS_DEFAULTS.items():
+                if row.get(col) is None:
+                    row[col] = default
+        columns = list(row.keys())
+        placeholders = ", ".join("?" for _ in columns)
+        col_names = ", ".join(columns)
+        update_clause = ", ".join(
+            f"{c} = excluded.{c}" for c in columns if c != conflict_key
+        )
+        sql = (
+            f"INSERT INTO {table} ({col_names}) VALUES ({placeholders}) "  # noqa: S608  # nosec B608
+            f"ON CONFLICT({conflict_key}) DO UPDATE SET {update_clause}"
+        )
+        with self._lock:
+            try:
+                self._conn.execute(sql, list(row.values()))
+                self._conn.commit()
+                return True
+            except sqlite3.Error:
+                logger.exception("upsert into %s failed", table)
+                self._conn.rollback()
+                return False
+
+    def query(
+        self,
+        table: str,
+        filters: dict[str, object] | None = None,
+    ) -> list[dict[str, object]]:
+        """Generic query satisfying ProtocolProjectionDatabaseSync."""
+        allowed_cols = self._ALLOWED_TABLES.get(table)
+        if allowed_cols is None:
+            raise ValueError(f"Unsupported table: {table!r}")
+        if filters:
+            invalid = [k for k in filters if k not in allowed_cols]
+            if invalid:
+                raise ValueError(f"Unsupported filter keys for {table!r}: {invalid}")
+        sql = f"SELECT * FROM {table}"  # noqa: S608  # nosec B608
+        params: list[object] = []
+        if filters:
+            clauses = [f"{k} = ?" for k in filters]
+            sql += " WHERE " + " AND ".join(clauses)
+            params = list(filters.values())
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""
