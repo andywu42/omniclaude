@@ -179,8 +179,12 @@ class TestInprocessWiringEndToEnd:
             pytest.skip("evidence_bundle module not importable in this venv")
 
         monkeypatch.setenv("ONEX_STATE_DIR", str(tmp_path))
+        # Routing delta reads endpoint from LLM_CODER_* env vars (OMN-10657)
         monkeypatch.setenv("LLM_CODER_URL", "http://test-backend.invalid:8000")
         monkeypatch.setenv("LLM_CODER_FAST_URL", "http://test-backend.invalid:8001")
+        import omnibase_infra.nodes.node_delegation_routing_reducer.handlers.handler_delegation_routing as _h
+
+        _h._config = None
 
         with patch(
             "omniclaude.delegation.inprocess_runner._call_llm",
@@ -191,9 +195,10 @@ class TestInprocessWiringEndToEnd:
                 force_local=True,
             )
 
+        _h._config = None
+
         bundle_dir = Path(result["evidence_bundle_path"])
         bifrost = json.loads((bundle_dir / "bifrost_response.json").read_text())
-        # Endpoint comes from real routing_delta + LLM_CODER_*_URL env we set
         assert bifrost["backend_selected"].startswith("http://test-backend.invalid:")
         assert bifrost["model_used"] == _MOCK_MODEL_USED
         assert bifrost["prompt_tokens"] == _MOCK_LLM_USAGE["prompt_tokens"]
