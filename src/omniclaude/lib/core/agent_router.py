@@ -34,9 +34,10 @@ import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, cast
 from uuid import uuid4
 
 import yaml
@@ -45,6 +46,20 @@ import yaml
 from omniclaude.lib.errors import EnumCoreErrorCode, OnexError
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_session_id_canonical() -> str:
+    try:
+        from session_id import (
+            resolve_session_id,  # type: ignore[import-not-found]  # noqa: PLC0415
+        )
+    except ModuleNotFoundError as exc:
+        if exc.name != "session_id":
+            raise
+        from plugins.onex.hooks.lib.session_id import (
+            resolve_session_id,  # noqa: PLC0415
+        )
+    return resolve_session_id()
 
 
 def _get_default_registry_path() -> str:
@@ -297,7 +312,7 @@ class AgentRouter:
             payload: dict[str, object] = {
                 "correlation_id": str(uuid4()),
                 "request_id": str(uuid4()),
-                "session_id": session_id or os.getenv("CLAUDE_SESSION_ID", "unknown"),
+                "session_id": session_id or _resolve_session_id_canonical(),
                 "selected_agent": selected_agent,
                 "llm_agent": selected_agent,
                 "fuzzy_agent": selected_agent,
@@ -330,7 +345,10 @@ class AgentRouter:
             if emitted:
                 logger.debug(
                     "Routing decision event emitted",
-                    extra={"selected_agent": selected_agent, "topic": "llm.routing.decision"},
+                    extra={
+                        "selected_agent": selected_agent,
+                        "topic": "llm.routing.decision",
+                    },
                 )
             else:
                 logger.debug(
@@ -381,6 +399,10 @@ class AgentRouter:
             with self._stats_lock:
                 self.routing_stats["total_routes"] += 1
             context = context or {}
+            raw_sid = context.get("session_id")
+            context_session_id: str | None = (
+                str(raw_sid) if raw_sid is not None else None
+            )
 
             logger.debug(
                 f"Routing request: {user_request[:100]}...",
@@ -450,7 +472,7 @@ class AgentRouter:
                         timing=timing,
                         routing_policy="explicit_request",
                         fallback=False,
-                        session_id=context.get("session_id") if isinstance(context, dict) else None,
+                        session_id=context_session_id,
                     )
 
                     return result
@@ -561,7 +583,7 @@ class AgentRouter:
                 timing=timing,
                 routing_policy="trigger_match",
                 fallback=len(recommendations) == 0,
-                session_id=context.get("session_id") if isinstance(context, dict) else None,
+                session_id=context_session_id,
             )
 
             return recommendations
