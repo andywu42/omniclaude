@@ -7,7 +7,9 @@ Invoked when the user runs /onex:delegate.  Classifies the prompt via
 TaskClassifier, then dispatches to the runtime via:
   1. SSH socket (ONEX_RUNTIME_SSH_HOST + ONEX_RUNTIME_SOCKET_PATH both set)
   2. HTTP (ONEX_RUNTIME_URL is set and non-empty)
-  3. Kafka (contract-driven, topic onex.cmd.omniclaude.delegate-task.v1)
+  3. Kafka (contract-driven — topic and event_type resolved from the deployed
+     omnibase_infra node_delegation_orchestrator contract.yaml at import time;
+     falls back to TopicBase.DELEGATE_TASK if the contract is unavailable)
      Uses KAFKA_BOOTSTRAP_SERVERS — fail-fast if unset.
 
 Optional env vars:
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import uuid
@@ -80,14 +83,105 @@ try:
 except ImportError:
     _HAS_EVIDENCE_BUNDLE = False
 
-try:
-    from omniclaude.hooks.topics import TopicBase as _TopicBase
 
-    # Use DELEGATE_TASK - the canonical topic that node_delegation_orchestrator
-    # subscribes to (contract.yaml:39). Aligned in OMN-10050.
-    _DELEGATION_REQUEST_TOPIC: str = _TopicBase.DELEGATE_TASK
-except (ImportError, AttributeError):
-    _DELEGATION_REQUEST_TOPIC = ""  # fallback; emit still works via event_type key
+def _load_infra_orchestrator_contract() -> dict:  # type: ignore[type-arg]
+    """Load the omnibase_infra node_delegation_orchestrator contract.yaml.
+
+    Searches for the contract relative to the omnibase_infra package location,
+    falling back gracefully if not installed or not findable. Returns an empty
+    dict on any failure so callers can apply their own defaults.
+    """
+    search_roots: list[Path] = []
+
+    # 1. Try via installed package location
+    try:
+        import omnibase_infra as _obi  # noqa: PLC0415
+
+        pkg_root = Path(_obi.__file__).parent
+        search_roots.append(pkg_root)
+    except ImportError:
+        pass
+
+    # 2. Try common repo paths relative to this skill file
+    _repo_candidates = [
+        _PLUGIN_ROOT.parent.parent.parent.parent
+        / "omnibase_infra"
+        / "src"
+        / "omnibase_infra",
+        _PLUGIN_ROOT.parent.parent.parent.parent.parent
+        / "omnibase_infra"
+        / "src"
+        / "omnibase_infra",
+    ]
+    search_roots.extend(_repo_candidates)
+
+    for root in search_roots:
+        candidate = root / "nodes" / "node_delegation_orchestrator" / "contract.yaml"
+        if candidate.exists():
+            try:
+                import yaml  # noqa: PLC0415
+
+                with candidate.open() as f:
+                    return yaml.safe_load(f) or {}
+            except Exception:  # noqa: BLE001
+                return {}
+
+    return {}
+
+
+def _resolve_delegation_topic_and_event_type() -> tuple[str, str]:
+    """Return (topic, event_type) from the deployed omnibase_infra contract.
+
+    Priority:
+      1. omnibase_infra node_delegation_orchestrator contract.yaml subscribe_topics[0]
+      2. TopicBase.DELEGATE_TASK (omniclaude fallback)
+      3. Empty string (last resort; Kafka path will fail-fast anyway)
+
+    event_type defaults to the first consumed_event's event_type, then
+    "omnibase-infra.delegation-request" (matching DispatcherDelegationRequest.message_types).
+    """
+    contract = _load_infra_orchestrator_contract()
+
+    # Extract topic
+    topic: str = ""
+    try:
+        subscribe_topics = contract.get("event_bus", {}).get("subscribe_topics", [])
+        if subscribe_topics:
+            # First subscribe topic is the primary inbound command topic
+            topic = str(subscribe_topics[0])
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Extract event_type from consumed_events or published_events
+    event_type: str = ""
+    try:
+        consumed = contract.get("consumed_events", [])
+        if consumed:
+            event_type = str(consumed[0].get("event_type", ""))
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Fallback chain for topic
+    if not topic:
+        try:
+            from omniclaude.hooks.topics import TopicBase as _TopicBase  # noqa: PLC0415
+
+            topic = _TopicBase.DELEGATE_TASK
+        except (ImportError, AttributeError):
+            topic = ""
+
+    # Fallback for event_type — must match dispatcher_delegation_request.message_types
+    if not event_type:
+        event_type = "omnibase-infra.delegation-request"
+
+    return topic, event_type
+
+
+_DELEGATION_REQUEST_TOPIC: str
+_DELEGATION_EVENT_TYPE: str
+_DELEGATION_REQUEST_TOPIC, _DELEGATION_EVENT_TYPE = (
+    _resolve_delegation_topic_and_event_type()
+)
 
 
 DELEGATABLE: frozenset[object] = (
@@ -335,6 +429,7 @@ def _dispatch_via_kafka(
     delegation_payload: dict,  # type: ignore[type-arg]
     correlation_id_str: str,
     topic: str,
+    task_type: str,
 ) -> dict:  # type: ignore[type-arg]
     """Publish delegation command to Kafka topic.
 
@@ -367,13 +462,15 @@ def _dispatch_via_kafka(
     from datetime import UTC, datetime  # noqa: PLC0415
     from uuid import uuid4  # noqa: PLC0415
 
+    emitted_at = datetime.now(UTC).isoformat()
     envelope = {
-        "event_type": "DelegateTaskCommand",
-        "event_id": str(uuid4()),
-        "timestamp": datetime.now(UTC).isoformat(),
-        "source": "omniclaude.delegate-skill",
+        "event_type": _DELEGATION_EVENT_TYPE,
+        "envelope_id": str(uuid4()),
+        "envelope_timestamp": emitted_at,
         "correlation_id": correlation_id_str,
-        "payload": delegation_payload,
+        "payload": _build_delegation_request_payload(
+            delegation_payload, task_type, emitted_at
+        ),
     }
     message = json.dumps(envelope).encode("utf-8")
     key = correlation_id_str.encode("utf-8")
@@ -425,6 +522,213 @@ def _dispatch_via_kafka(
     }
 
 
+def _dispatch_via_pandaproxy(
+    delegation_payload: dict,  # type: ignore[type-arg]
+    correlation_id_str: str,
+    topic: str,
+    task_type: str,
+    pandaproxy_url: str,
+    timeout_seconds: float,
+) -> dict:  # type: ignore[type-arg]
+    """Publish delegation command via Redpanda HTTP proxy (pandaproxy).
+
+    Uses curl subprocess — Python sockets lack the macOS LAN grant on uv-managed
+    interpreters, but the curl binary has it. Builds a ModelEventEnvelope-compatible
+    payload and POSTs to /topics/<topic> with application/vnd.kafka.json.v2+json.
+
+    pandaproxy_url example: http://192.168.86.201:28082  # onex-allow-internal-ip # kafka-fallback-ok
+
+    Returns a result dict with success/error keys.
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415
+    from uuid import uuid4  # noqa: PLC0415
+
+    emitted_at = datetime.now(UTC).isoformat()
+    envelope = {
+        "event_type": _DELEGATION_EVENT_TYPE,
+        "envelope_id": str(uuid4()),
+        "envelope_timestamp": emitted_at,
+        "correlation_id": correlation_id_str,
+        "payload": _build_delegation_request_payload(
+            delegation_payload, task_type, emitted_at
+        ),
+    }
+    body = json.dumps({"records": [{"value": envelope}]})
+    url = f"{pandaproxy_url.rstrip('/')}/topics/{topic}"
+
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [
+                "curl",
+                "-fsS",
+                "-X",
+                "POST",
+                url,
+                "-H",
+                "Content-Type: application/vnd.kafka.json.v2+json",
+                "-d",
+                body,
+                "--max-time",
+                str(int(timeout_seconds)),
+            ],
+            capture_output=True,
+            timeout=timeout_seconds + 5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "success": False,
+            "error": f"Pandaproxy curl failed: {exc}",
+            "correlation_id": correlation_id_str,
+            "path": "pandaproxy",
+        }
+
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+        return {
+            "success": False,
+            "error": f"Pandaproxy curl exited {proc.returncode}: {stderr}",
+            "correlation_id": correlation_id_str,
+            "path": "pandaproxy",
+        }
+
+    try:
+        raw = json.loads(proc.stdout.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        return {
+            "success": False,
+            "error": f"Pandaproxy response parse failed: {exc}",
+            "correlation_id": correlation_id_str,
+            "path": "pandaproxy",
+        }
+
+    offsets = raw.get("offsets", [])
+    if not offsets or offsets[0].get("error_code", 0) != 0:
+        err = offsets[0].get("error", "unknown") if offsets else "no offsets returned"
+        return {
+            "success": False,
+            "error": f"Pandaproxy produce failed: {err}",
+            "correlation_id": correlation_id_str,
+            "path": "pandaproxy",
+        }
+
+    return {
+        "success": True,
+        "correlation_id": correlation_id_str,
+        "topic": topic,
+        "path": "pandaproxy",
+        "dispatch_status": "published",
+        "partition": offsets[0].get("partition"),
+        "offset": offsets[0].get("offset"),
+    }
+
+
+def _build_delegation_request_payload(
+    delegation_payload: dict,  # type: ignore[type-arg]
+    task_type: str,
+    emitted_at: str,
+) -> dict:  # type: ignore[type-arg]
+    """Build a ModelDelegationRequest-compatible payload dict.
+
+    ModelDelegationRequest uses extra="forbid", so only known fields may be sent.
+    Maps delegation_payload's field names to ModelDelegationRequest's names.
+    """
+    return {
+        "prompt": delegation_payload.get("prompt", ""),
+        "task_type": task_type,
+        "source_session_id": delegation_payload.get("session_id"),
+        "source_file_path": delegation_payload.get("source_file_path"),
+        "correlation_id": delegation_payload.get("correlation_id"),
+        "max_tokens": delegation_payload.get("max_tokens", 2048),
+        "emitted_at": emitted_at,
+    }
+
+
+def _dispatch_via_ssh_rpk(
+    delegation_payload: dict,  # type: ignore[type-arg]
+    correlation_id_str: str,
+    topic: str,
+    task_type: str,
+    ssh_host: str,
+    bridge_script: str,
+    timeout_seconds: float,
+) -> dict:  # type: ignore[type-arg]
+    """Publish delegation command to Kafka via SSH + rpk bridge script on the remote host.
+
+    Builds a ModelEventEnvelope-compatible JSON payload and pipes it through SSH to
+    bridge_script on ssh_host, which publishes it via `rpk topic produce`.
+
+    Returns a result dict with success/error keys.
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415
+    from uuid import uuid4  # noqa: PLC0415
+
+    emitted_at = datetime.now(UTC).isoformat()
+    envelope = {
+        "event_type": _DELEGATION_EVENT_TYPE,
+        "envelope_id": str(uuid4()),
+        "envelope_timestamp": emitted_at,
+        "correlation_id": correlation_id_str,
+        "payload": _build_delegation_request_payload(
+            delegation_payload, task_type, emitted_at
+        ),
+    }
+    message = json.dumps(envelope)
+
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                ssh_host,
+                f"bash {shlex.quote(bridge_script)} {shlex.quote(topic)}",
+            ],
+            input=message.encode("utf-8"),
+            capture_output=True,
+            timeout=timeout_seconds + 15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "success": False,
+            "error": f"SSH rpk bridge failed: {exc}",
+            "correlation_id": correlation_id_str,
+            "path": "ssh_rpk",
+        }
+
+    stdout = proc.stdout.decode("utf-8", errors="replace").strip()
+    stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+
+    if proc.returncode != 0:
+        return {
+            "success": False,
+            "error": f"SSH rpk bridge exited {proc.returncode}: {stderr or stdout}",
+            "correlation_id": correlation_id_str,
+            "path": "ssh_rpk",
+        }
+
+    # rpk outputs "Produced to partition N at offset M..." on success
+    if "Produced to partition" not in stdout:
+        return {
+            "success": False,
+            "error": f"SSH rpk bridge unexpected output: {stdout or stderr}",
+            "correlation_id": correlation_id_str,
+            "path": "ssh_rpk",
+        }
+
+    return {
+        "success": True,
+        "correlation_id": correlation_id_str,
+        "topic": topic,
+        "path": "ssh_rpk",
+        "dispatch_status": "published",
+        "bridge_output": stdout,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Core dispatch function
 # ---------------------------------------------------------------------------
@@ -448,7 +752,9 @@ def classify_and_publish(
     Transport priority:
       1. SSH socket (ONEX_RUNTIME_SSH_HOST + ONEX_RUNTIME_SOCKET_PATH)
       2. HTTP (ONEX_RUNTIME_URL)
-      3. Kafka (contract-driven, topic onex.cmd.omniclaude.delegate-task.v1)
+      3. Pandaproxy HTTP (ONEX_PANDAPROXY_URL) — preferred for Mac→.201 LAN
+      4. SSH rpk bridge (ONEX_RUNTIME_SSH_HOST + ONEX_KAFKA_BRIDGE_SCRIPT) — fallback
+      5. Kafka (contract-driven; topic resolved from omnibase_infra contract at import time)
 
     force_local=True returns an explicit error (OMN-10723).
     """
@@ -512,6 +818,8 @@ def classify_and_publish(
     timeout_seconds = timeout_ms / 1000.0
     ssh_host = os.environ.get("ONEX_RUNTIME_SSH_HOST", "").strip()
     ssh_socket_path = os.environ.get("ONEX_RUNTIME_SOCKET_PATH", "").strip()
+    kafka_bridge_script = os.environ.get("ONEX_KAFKA_BRIDGE_SCRIPT", "").strip()
+    pandaproxy_url = os.environ.get("ONEX_PANDAPROXY_URL", "").strip()
     runtime_url = os.environ.get("ONEX_RUNTIME_URL", "").strip()
 
     if ssh_host and ssh_socket_path:
@@ -628,11 +936,43 @@ def classify_and_publish(
             "path": "http",
         }
 
+    # Pandaproxy HTTP: preferred Mac→.201 transport (curl/urllib have LAN grant)
+    if pandaproxy_url:
+        pp_result = _dispatch_via_pandaproxy(
+            delegation_payload=delegation_payload,
+            correlation_id_str=correlation_id_str,
+            topic=_DELEGATION_REQUEST_TOPIC,
+            task_type=intent.value,
+            pandaproxy_url=pandaproxy_url,
+            timeout_seconds=timeout_seconds,
+        )
+        if pp_result["success"]:
+            pp_result["task_type"] = intent.value
+            pp_result["command_name"] = _DELEGATION_COMMAND_NAME
+        return pp_result
+
+    # SSH rpk bridge: fallback Mac→.201 Kafka via SSH when direct Kafka is unreachable
+    if ssh_host and kafka_bridge_script:
+        rpk_result = _dispatch_via_ssh_rpk(
+            delegation_payload=delegation_payload,
+            correlation_id_str=correlation_id_str,
+            topic=_DELEGATION_REQUEST_TOPIC,
+            task_type=intent.value,
+            ssh_host=ssh_host,
+            bridge_script=kafka_bridge_script,
+            timeout_seconds=timeout_seconds,
+        )
+        if rpk_result["success"]:
+            rpk_result["task_type"] = intent.value
+            rpk_result["command_name"] = _DELEGATION_COMMAND_NAME
+        return rpk_result
+
     # Kafka: contract-driven transport (OMN-10834)
     kafka_result = _dispatch_via_kafka(
         delegation_payload=delegation_payload,
         correlation_id_str=correlation_id_str,
         topic=_DELEGATION_REQUEST_TOPIC,
+        task_type=intent.value,
     )
     if kafka_result["success"]:
         kafka_result["task_type"] = intent.value
