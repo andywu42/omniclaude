@@ -154,7 +154,7 @@ class NodeQuirkClassifierCompute:
 
     def __init__(
         self,
-        db_session_factory: Any | None = None,
+        db_session_factory: Callable[..., Any] | None = None,
         publish_hook: _PublishHook | None = None,
         operator_block_approved: bool = False,
         window_hours: int = _WINDOW_HOURS,
@@ -255,7 +255,7 @@ class NodeQuirkClassifierCompute:
             finding_id=uuid4(),
             quirk_type=trigger_signal.quirk_type,
             signal_id=trigger_signal.quirk_id,
-            policy_recommendation=recommendation,  # type: ignore[arg-type]
+            policy_recommendation=recommendation,  # type: ignore[arg-type]  # Why: EnumPolicyRecommendation narrowing from broader union
             suggested_exemptions=[],
             fix_guidance=guide,
             confidence=round(entry.mean_confidence, 4),

@@ -19,10 +19,8 @@ if [[ "${OMNICLAUDE_HOOKS_DISABLED:-0}" == "1" ]]; then
     cat  # drain stdin
     exit 0
 fi
-if [[ "${OMNICLAUDE_HOOK_HANDOFF_NUDGE:-1}" == "0" ]]; then
-    cat  # drain stdin
-    exit 0
-fi
+source "$(dirname "${BASH_SOURCE[0]}")/hook-gate.sh" 2>/dev/null || true
+onex_hook_gate HANDOFF_NUDGE || exit 0
 
 # -----------------------------------------------------------------------
 # Read stdin (Claude Code UserPromptSubmit JSON)
@@ -93,6 +91,7 @@ This is a one-time suggestion for this session."
 MODIFIED=$(printf '%s' "$PROMPT_INFO" | jq \
     --arg nudge "$NUDGE" \
     '.hookSpecificOutput = (.hookSpecificOutput // {}) |
+     .hookSpecificOutput.hookEventName = "UserPromptSubmit" |
      .hookSpecificOutput.additionalContext = (
        ((.hookSpecificOutput.additionalContext // "") + "\n\n" + $nudge)
        | ltrimstr("\n\n")

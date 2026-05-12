@@ -86,9 +86,9 @@ For each critical PR:
 3. CLEAN + green + no auto-merge → enable
 4. Report any newly merged since last tick
 
-**Report:** Only if a critical PR merged, or needs a worker dispatched (report to team-lead with specifics since you cannot spawn Agent directly). Otherwise silent.
+**Report:** Only if a critical PR merged, or needs a worker dispatched (report to team-lead with specifics since you cannot spawn Agent directly). Otherwise emit friction via Skill(skill="onex:record_friction", args='"'"'{"surface":"tick_idle","reason":"no action taken","tick":"merge-sweep"}'"'"') — do NOT write raw .onex_state/friction/ markdown.
 
-Rules: NO admin on non-critical PRs. Dequeue/re-enqueue pre-authorized. Silent ≠ passive.'
+Rules: NO admin on non-critical PRs. Dequeue/re-enqueue pre-authorized. You MUST act or emit friction — silent-and-idle with open PRs present is a PROCESS FAILURE.'
 
 DISPATCH_ENGINE_PROMPT='BUILD DISPATCH ENGINE — you MUST dispatch work this tick or explain why not.
 
@@ -120,7 +120,7 @@ Count workers spawned this tick. If 0 AND backlog has unworked tickets: write a 
 - Reduce complexity — no new architecture without user approval
 - Dogfood: if node_dispatch_worker is deployed, route through it instead of Agent()
 - Route mechanical work to local models (.201:8000 Qwen3-Coder, .201:8001 DeepSeek-R1) when possible
-- Silent ≠ passive. Action IS the correct silent behavior.'
+- You MUST act or emit friction via Skill(skill="onex:record_friction", args='"'"'{"surface":"tick_idle","reason":"<why>","tick":"dispatch-engine"}'"'"'). Raw .onex_state/friction/ writes are forbidden — only the skill routes through node_friction_observer_compute. 0 dispatches with unworked tickets + no friction emitted = FAILURE.'
 
 CONTRACT_VERIFY_PROMPT='CONTRACT VERIFICATION + BACKFILL — every ticket must have a ModelTicketContract
 
@@ -147,7 +147,7 @@ Fan out up to 3 backfill workers per tick. Don'\''t overwrite existing contracts
 - Close contracts for tickets that moved to Done/Canceled since last tick
 - Report: tickets scanned, contracts present, contracts backfilled, remaining gaps
 
-**Report rule**: only if contracts were backfilled, gaps remain, or action needed. Otherwise silent.'
+**Report rule**: only if contracts were backfilled, gaps remain, or action needed. Otherwise emit friction via Skill(skill="onex:record_friction", args='"'"'{"surface":"tick_idle","reason":"no contracts backfilled, no gaps","tick":"contract-verify"}'"'"'). Raw .onex_state/friction/ writes are forbidden.'
 
 OVERSEER_VERIFY_PROMPT='OVERSEER VERIFY + DISPATCH AUDIT — verify completed work AND check that the dispatch engine is working.
 
@@ -160,7 +160,12 @@ Check for PRs merged or tickets Done in the last hour. For each, run: uv run pyt
 3. If gap > 0 (unworked tickets exist, no workers dispatched): THIS IS A FAILURE. Spawn workers for the gap NOW. Do not just report it.
 4. Did any dispatched work use the dogfood path (node_dispatch_worker + local model)? Or all Claude agents? Log which.
 
-This tick MUST end with: (a) all recent completions verified, (b) all unworked tickets either dispatched or explicitly blocked with reason.'
+**Part 3 — env-sync.log alert check (MANDATORY every tick)**
+Run: cd $OMNI_HOME/omniclaude && uv run python -m plugins.onex.skills.env_sync_alert._lib.check
+- Exit 0: clean, no action needed
+- Exit 1: alert fired — friction YAML written to $ONEX_STATE_DIR/friction/. SendMessage to team-lead: "[env-sync-alert] ALERT: <description from friction file>". Do NOT skip this step.
+
+This tick MUST end with: (a) all recent completions verified, (b) all unworked tickets either dispatched or explicitly blocked with reason, (c) env-sync alert check completed.'
 
 DATA_FLOW_SWEEP_PROMPT='DATA FLOW SWEEP — verify end-to-end Kafka→DB→dashboard data flows.
 
@@ -173,7 +178,7 @@ This checks every topic in omnidash/topics.yaml: producer emits, consumer lag 0,
 - Report each broken flow to team-lead: SendMessage(to="team-lead", content="[data-flow-sweep] BROKEN: <topic> — <classification>")
 - Tickets are auto-created by the skill (unless --dry-run)
 
-**If clean (exit 0):** silent — no report needed.
+**If clean (exit 0):** no report needed, but emit friction via Skill(skill="onex:record_friction", args='"'"'{"surface":"tick_idle","reason":"data-flow-sweep clean","tick":"data-flow-sweep"}'"'"') so node_friction_observer_compute records the tick ran. Raw .onex_state/friction/ writes are forbidden.
 
 Rules:
 - Always pass --skip-playwright when running unattended (no browser session)
@@ -191,7 +196,7 @@ This checks all contract-declared handlers are wired in dispatch, all topics hav
 - Report summary to team-lead: SendMessage(to="team-lead", content="[runtime-sweep] FINDINGS: <count> — types: <types>")
 - Tickets are auto-created by the skill (unless --dry-run)
 
-**If clean (exit 0):** silent — no report needed.
+**If clean (exit 0):** no report needed, but emit friction via Skill(skill="onex:record_friction", args='"'"'{"surface":"tick_idle","reason":"runtime-sweep clean","tick":"runtime-sweep"}'"'"') so node_friction_observer_compute records the tick ran. Raw .onex_state/friction/ writes are forbidden.
 
 Rules:
 - Default scope is all-repos; use --scope omnidash-only if runtime is degraded

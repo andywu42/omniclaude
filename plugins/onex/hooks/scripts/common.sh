@@ -21,18 +21,67 @@
 # =============================================================================
 
 # =============================================================================
+# Hook Bitmask Gate [OMN-9617]
+# =============================================================================
+# Sources hook_bits.sh once per session. Each GATE wrapper calls:
+#   onex_hook_gate <BIT_NAME> || exit 0
+# to silently skip when the bit is cleared in ONEX_HOOKS_MASK.
+: "${ONEX_HOOK_BITS_SOURCED:=}"
+if [[ -z "$ONEX_HOOK_BITS_SOURCED" ]]; then
+  _hook_bits_path="${HOOKS_DIR:-$(dirname "${BASH_SOURCE[0]}")/..}/lib/hook_bits.sh"
+  if [[ -f "$_hook_bits_path" ]]; then
+    source "$_hook_bits_path"
+  fi
+  ONEX_HOOK_BITS_SOURCED=1
+fi
+unset _hook_bits_path
+
+onex_hook_gate() {
+  local bit_name="$1"
+  local bit
+  bit="$(hook_bits_bit_for_name "$bit_name" 2>/dev/null || true)"
+  [[ -z "$bit" ]] && return 0
+  local mask
+  mask="$(hook_bits_parse_mask "${ONEX_HOOKS_MASK:-$HOOK_BITS_DEFAULT_MASK}")"
+  hook_bits_is_enabled "$mask" "$bit"
+}
+
+# =============================================================================
 # Python Environment Detection
 # =============================================================================
+# Canonical Homebrew Python interpreter for macOS hook launchers (OMN-10113).
+# All hook scripts that invoke Python must use: env -u PYTHONPATH "$BREW_PY" ...
+# This prevents PYTHONPATH leaks from the parent shell from corrupting imports.
+# Scope: macOS Apple Silicon only (ARM Homebrew prefix /opt/homebrew).
+# Intel Mac (/usr/local) and Linux are not supported runtime profiles for these hooks.
+# Version is intentionally pinned to 3.13 per the one-Python policy (OMN-10079).
+BREW_PY="/opt/homebrew/bin/python3.13"
+export BREW_PY
+
+# Default path to the omniclaude event registry YAML (OMN-10117).
+# Consumers: session-start.sh daemon launcher, Task 14 launcher, Task 22 restart handler.
+# Override: set ONEX_EMIT_EVENT_REGISTRY before sourcing common.sh.
+: "${ONEX_EMIT_EVENT_REGISTRY:=${OMNI_HOME:-}/omniclaude/plugins/onex/lib/event_registry/omniclaude.yaml}"
+export ONEX_EMIT_EVENT_REGISTRY
+
+# Shared emit-daemon paths for hook launch/restart/stop surfaces.
+# Session-start may override EMIT_DAEMON_SOCKET before sourcing common.sh.
+: "${EMIT_DAEMON_SOCKET:=${OMNICLAUDE_EMIT_SOCKET:-${HOME}/.claude/emit.sock}}"
+: "${EMIT_DAEMON_PID_FILE:=${HOME}/.claude/emit.pid}"
+export EMIT_DAEMON_SOCKET
+export EMIT_DAEMON_PID_FILE
+
 # Strict priority chain with NO fallbacks. If no valid Python is found,
 # hooks refuse to run. This prevents silent degradation where hooks run
 # against the wrong interpreter with missing dependencies.
 #
 # Priority:
 #   1. PLUGIN_PYTHON_BIN env var (explicit override / escape hatch)
-#   2. Repo main venv at PLUGIN_ROOT/../../.venv (OMN-7310: use repo venv, not plugin lib venv)
-#   2.5. ONEX_REGISTRY_ROOT/omniclaude/.venv (plugin cache path can't resolve repo venv)
-#   3. OMNICLAUDE_PROJECT_ROOT/.venv (explicit dev mode, no heuristics)
-#   4. Hard failure with actionable error message
+#   2. CLAUDE_PLUGIN_DATA/.venv (OMN-10500: built by ensure-plugin-venv.sh, survives plugin updates)
+#   2.5. Repo main venv at PLUGIN_ROOT/../../.venv (OMN-7310: only works from source, not cache)
+#   3. ONEX_REGISTRY_ROOT/omniclaude/.venv (plugin cache path can't resolve repo venv)
+#   4. OMNICLAUDE_PROJECT_ROOT/.venv (explicit dev mode, no heuristics)
+#   5. Hard failure with actionable error message
 
 find_python() {
     # 1. Explicit override (escape hatch for custom environments)
@@ -41,7 +90,13 @@ find_python() {
         return
     fi
 
-    # 2. Repo main venv (OMN-7310: plugin lives at plugins/onex/, repo root is ../..)
+    # 2. Plugin data venv (CLAUDE_PLUGIN_DATA — survives plugin updates, built by ensure-plugin-venv.sh)
+    if [[ -n "${CLAUDE_PLUGIN_DATA:-}" && -x "${CLAUDE_PLUGIN_DATA}/.venv/bin/python3" ]]; then
+        echo "${CLAUDE_PLUGIN_DATA}/.venv/bin/python3"
+        return
+    fi
+
+    # 2.5. Repo main venv (OMN-7310: plugin lives at plugins/onex/, repo root is ../..)
     local repo_root
     repo_root="$(cd "${PLUGIN_ROOT}/../.." 2>/dev/null && pwd)"
     if [[ -n "$repo_root" && -f "${repo_root}/.venv/bin/python3" && -x "${repo_root}/.venv/bin/python3" ]]; then
@@ -736,7 +791,7 @@ _try_restart_emit_daemon() {
     # Kill stale daemon process with tight pattern matching
     # Match process with full socket path to avoid false positives
     local stale_pids
-    stale_pids=$(pgrep -f "omniclaude\.publisher start.*--socket-path $(printf '%s\n' "$socket_path" | sed 's/[[\.*^$/]/\\&/g')" 2>/dev/null) || true
+    stale_pids=$(pgrep -f "omnimarket\.nodes\.node_emit_daemon start.*--socket-path $(printf '%s\n' "$socket_path" | sed 's/[[\.*^$/]/\\&/g')" 2>/dev/null) || true
 
     if [[ -n "$stale_pids" ]]; then
         log "Emit daemon: Killing stale processes: $stale_pids"
@@ -751,10 +806,14 @@ _try_restart_emit_daemon() {
         return 1
     fi
 
-    nohup "$PYTHON_CMD" -m omniclaude.publisher start \
-        --kafka-servers "$KAFKA_BOOTSTRAP_SERVERS" \
+    nohup env -u PYTHONPATH "$BREW_PY" -m omnimarket.nodes.node_emit_daemon start \
         --socket-path "$socket_path" \
-        >> "${ONEX_STATE_DIR}/hooks/logs/emit-daemon.log" 2>&1 &
+        --pid-path "$EMIT_DAEMON_PID_FILE" \
+        --kafka-bootstrap-servers "$KAFKA_BOOTSTRAP_SERVERS" \
+        --spool-dir "${ONEX_STATE_DIR}/event-spool" \
+        --event-registry "$ONEX_EMIT_EVENT_REGISTRY" \
+        --log-path "${ONEX_STATE_DIR}/hooks/logs/emit-daemon.log" \
+        >/dev/null 2>&1 &
 
     local daemon_pid=$!
     log "Emit daemon: Respawned with PID $daemon_pid, socket: $socket_path"

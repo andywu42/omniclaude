@@ -47,10 +47,10 @@ from omnibase_core.models.hooks.claude_code import (
     ModelClaudeCodeHookEvent,
     ModelClaudeCodeHookEventPayload,
 )
-from omnibase_infra.event_bus.event_bus_kafka import EventBusKafka
 from omnibase_infra.event_bus.models.config import ModelKafkaEventBusConfig
 
 from omniclaude.hooks._helpers import normalize_action_description
+from omniclaude.hooks.emit_bus_bootstrapper import create_kafka_event_bus
 from omniclaude.hooks.models import ModelEventPublishResult
 from omniclaude.hooks.schemas import (
     HookEventType,
@@ -68,6 +68,7 @@ from omniclaude.hooks.topics import TopicBase, build_topic
 
 if TYPE_CHECKING:
     from omnibase_core.enums.hooks.claude_code import EnumClaudeCodeHookEventType
+    from omnibase_infra.event_bus.event_bus_kafka import EventBusKafka
 
     from omniclaude.hooks.schemas import ModelHookPayload
 
@@ -549,7 +550,7 @@ async def emit_hook_event(
 
         # Create Kafka config and bus
         config = create_kafka_config()
-        bus = EventBusKafka(config=config)
+        bus = create_kafka_event_bus(config)
 
         # Start producer
         await bus.start()
@@ -636,13 +637,13 @@ async def emit_hook_event(
         ):
             _emit_event_cb = None
             try:
-                from emit_client_wrapper import (  # type: ignore[no-redef]  # noqa: PLC0415
+                from emit_client_wrapper import (  # type: ignore[no-redef]  # Why: fallback import path in except handler  # noqa: PLC0415
                     emit_event as _emit_event_cb,
                 )
             except ImportError:
                 pass
             if _emit_event_cb is not None:
-                try:  # type: ignore[unreachable]
+                try:  # type: ignore[unreachable]  # Why: only reached when circuit breaker error detected
                     _kafka_cfg = create_kafka_config()
                     _cb_payload: dict[str, object] = {
                         "event_id": str(_uuid.uuid4()),
@@ -1179,7 +1180,7 @@ async def emit_claude_hook_event(
 
         # Create Kafka config and bus
         kafka_config = create_kafka_config()
-        bus = EventBusKafka(config=kafka_config)
+        bus = create_kafka_event_bus(kafka_config)
 
         # Start producer
         await bus.start()
@@ -1327,7 +1328,7 @@ async def emit_session_outcome_from_config(
         # A shared bus would halve connection overhead at teardown but would
         # require lifetime management across independently-failable emitters.
         kafka_config = create_kafka_config()
-        bus = EventBusKafka(config=kafka_config)
+        bus = create_kafka_event_bus(kafka_config)
         await bus.start()
 
         # Publish to both topics (fan-out) with per-topic error handling

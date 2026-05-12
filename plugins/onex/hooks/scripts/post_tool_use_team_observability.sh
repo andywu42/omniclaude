@@ -30,10 +30,7 @@ if [[ "${OMNICLAUDE_HOOKS_DISABLED:-0}" == "1" ]]; then
     cat  # drain stdin
     exit 0
 fi
-if [[ "${OMNICLAUDE_HOOK_TEAM_OBSERVABILITY:-1}" == "0" ]]; then
-    cat  # drain stdin
-    exit 0
-fi
+onex_hook_gate TEAM_OBSERVABILITY || exit 0
 
 # --- Lite mode guard [OMN-5398] ---
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -112,7 +109,7 @@ _reset_failure() {
 }
 
 # --- Extract common fields ---
-SESSION_ID="${CLAUDE_SESSION_ID:-$(printf '%s\n' "$HOOK_EVENT" | jq -r '.session_id // "unknown"' 2>/dev/null)}"
+SESSION_ID="${CLAUDE_CODE_SESSION_ID:-$(printf '%s\n' "$HOOK_EVENT" | jq -r '.session_id // "unknown"' 2>/dev/null)}"
 CORRELATION_ID="${ONEX_CORRELATION_ID:-}"
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 DISPATCH_SURFACE="${ONEX_DISPATCH_SURFACE:-claude-code}"

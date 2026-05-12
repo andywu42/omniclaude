@@ -32,7 +32,7 @@ class ModelRoutingDecision(BaseModel):
 
     task_id: str
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
-    schema_version: str = _SCHEMA_VERSION
+    schema_version: str = _SCHEMA_VERSION  # string-version-ok: serialization-boundary model; appended to decisions.ndjson as JSON, must remain string
     intended_surface: str
     executed_surface: str
     agent_model: str
@@ -50,7 +50,8 @@ class RoutingRecorder:
     """
 
     def __init__(self, state_dir: str | None = None) -> None:
-        self._state_dir = Path(state_dir or os.getenv("ONEX_STATE_DIR", ".onex_state"))
+        state_root = state_dir if state_dir is not None else os.getenv("ONEX_STATE_DIR")
+        self._state_dir = Path(state_root or ".onex_state")
         self._decisions_path = self._state_dir / _DECISIONS_SUBPATH
 
     def record(
@@ -118,10 +119,7 @@ class RoutingRecorder:
     def _emit_kafka_event(self, decision: ModelRoutingDecision) -> None:
         """Emit routing decision as Kafka event. Fail-open: errors are logged."""
         try:
-            try:
-                from omnimarket.nodes.node_emit_daemon.client import EmitClient  # noqa: PLC0415, I001
-            except ImportError:
-                from omniclaude.publisher.emit_client import EmitClient  # type: ignore[no-redef]  # noqa: PLC0415, I001
+            from omnimarket.nodes.node_emit_daemon.client import EmitClient  # noqa: PLC0415, I001
 
             socket_path = os.getenv("OMNICLAUDE_EMIT_SOCKET", "")
             if not socket_path:

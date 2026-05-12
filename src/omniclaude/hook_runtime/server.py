@@ -4,7 +4,7 @@
 """Hook runtime daemon async Unix socket server. [OMN-5306, OMN-5312]
 
 Lightweight asyncio Unix socket server that services all omniclaude hook
-nodes. Follows the EmbeddedEventPublisher lifecycle pattern:
+nodes. Follows the emit daemon lifecycle pattern:
 - PID file management
 - Stale socket detection and cleanup
 - asyncio.start_unix_server binding
@@ -24,8 +24,10 @@ import socket
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from omnibase_infra.event_bus.event_bus_inmemory import EventBusInmemory
+from omnibase_infra.event_bus.event_bus_inmemory import EventBusInmemory  # noqa: TC002
 
+from omniclaude.delegation.bus_bootstrap import bootstrap_delegation_bus
+from omniclaude.delegation.sqlite_adapter import make_adapter
 from omniclaude.hook_runtime.delegation_state import DelegationConfig, DelegationState
 from omniclaude.hook_runtime.protocol import (
     HookRuntimeRequest,
@@ -37,6 +39,23 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_SOCKET_PATH = "/tmp/omniclaude-hook-runtime.sock"  # noqa: S108  # nosec B108
 _DEFAULT_PID_PATH = "/tmp/omniclaude-hook-runtime.pid"  # noqa: S108  # nosec B108
+
+
+def _hooks_disabled() -> bool:
+    """Check the omniclaude hook kill-switch. [OMN-9140]
+
+    Returns True if either:
+    - env var OMNICLAUDE_HOOKS_DISABLE=1, or
+    - file ~/.claude/omniclaude-hooks-disabled exists.
+
+    Kept a plain module function (not a classmethod) so shell hooks and the
+    daemon apply identical semantics and the check stays cheap.
+    """
+    if os.environ.get("OMNICLAUDE_HOOKS_DISABLE") == "1":
+        return True
+    if (Path.home() / ".claude" / "omniclaude-hooks-disabled").exists():
+        return True
+    return False
 
 
 @dataclass
@@ -98,7 +117,7 @@ class HookRuntimeConfig:
 class HookRuntimeServer:
     """Lightweight async Unix socket server for hook enforcement.
 
-    Follows EmbeddedEventPublisher lifecycle pattern:
+    Follows emit daemon lifecycle pattern:
     PID file, stale socket detection, signal handlers, graceful shutdown.
     No Kafka, no Postgres — pure in-memory state.
     """
@@ -146,10 +165,12 @@ class HookRuntimeServer:
         )
         self._running = True
 
-        # Wire EventBusInmemory for future node registration (OMN-5312)
-        # No handlers registered yet — this makes the bus available for
-        # future agent routing, LLM delegation, etc.
-        self._event_bus = EventBusInmemory(
+        # Wire EventBusInmemory with delegation projection handler (OMN-10718).
+        # bootstrap_delegation_bus() creates the bus, starts it, and subscribes
+        # HandlerProjectionDelegation on task-delegated events backed by SQLite.
+        db_adapter = make_adapter()
+        self._event_bus = await bootstrap_delegation_bus(
+            db_adapter=db_adapter,
             environment="hook-runtime",
             group="hook-handlers",
         )
@@ -254,6 +275,17 @@ class HookRuntimeServer:
         if req.action == "ping":
             return HookRuntimeResponse(decision="ack").model_dump_json()
 
+        # Kill-switch [OMN-9140]: short-circuit pass for all enforcement actions
+        # before threshold logic runs. Matches the shell-hook kill-switch so the
+        # daemon-first and fallback paths behave identically.
+        if _hooks_disabled() and req.action in {
+            "classify_tool",
+            "mark_delegated",
+            "set_skill_loaded",
+            "check_delegation_rule",
+        }:
+            return HookRuntimeResponse(decision="pass").model_dump_json()
+
         if req.action == "classify_tool":
             tool_name = str(req.payload.get("tool_name", ""))
             tool_input = req.payload.get("tool_input", {})
@@ -283,13 +315,81 @@ class HookRuntimeServer:
 
         if req.action == "check_delegation_rule":
             rule = (
-                "All tasks must be dispatched via onex:polymorphic-agent. "
+                "All tasks must be dispatched via a subagent. "
                 "Direct tool usage beyond thresholds triggers enforcement."
             )
             return HookRuntimeResponse(
                 decision="ack",
                 additional_context=rule,
             ).model_dump_json()
+
+        if req.action == "publish_delegation_event":
+            # Forward a task-delegated event to the inmemory bus so the
+            # projection handler writes it to SQLite. This is the in-process
+            # path (no Kafka required). The payload must be a valid
+            # task-delegated event dict; extra fields are ignored by the handler.
+            if self._event_bus is not None:
+                from omniclaude.delegation.emitter import (
+                    emit_task_delegated,  # noqa: PLC0415
+                )
+
+                payload = req.payload
+                _qgr_val = payload.get("quality_gate_reason")
+                _qgr: str | None = str(_qgr_val) if _qgr_val else None
+                _repo_val = payload.get("repo")
+                _repo: str | None = str(_repo_val) if _repo_val else None
+                _latency_val = payload.get("delegation_latency_ms", 0)
+                _latency: int = (
+                    int(_latency_val) if isinstance(_latency_val, (int, float)) else 0
+                )
+                _ti = payload.get("tokens_input", 0)
+                _tokens_in: int = int(_ti) if isinstance(_ti, (int, float)) else 0
+                _to = payload.get("tokens_output", 0)
+                _tokens_out: int = int(_to) if isinstance(_to, (int, float)) else 0
+                _cost_val = payload.get("cost_savings_usd", 0.0)
+                _cost: float = (
+                    float(_cost_val) if isinstance(_cost_val, (int, float)) else 0.0
+                )
+                try:
+                    await emit_task_delegated(
+                        bus=self._event_bus,
+                        correlation_id=str(payload.get("correlation_id", "")),
+                        session_id=str(payload.get("session_id", "") or ""),
+                        task_type=str(payload.get("task_type", "") or ""),
+                        delegated_to=str(payload.get("delegated_to", "") or ""),
+                        delegated_by=str(payload.get("delegated_by", "") or ""),
+                        quality_gate_passed=bool(
+                            payload.get("quality_gate_passed", False)
+                        ),
+                        delegation_latency_ms=_latency,
+                        cost_savings_usd=_cost,
+                        quality_gate_reason=_qgr,
+                        delegation_success=bool(
+                            payload.get("delegation_success", True)
+                        ),
+                        model_name=str(payload.get("model_name", "") or ""),
+                        tokens_input=_tokens_in,
+                        tokens_output=_tokens_out,
+                        repo=_repo,
+                        is_shadow=bool(payload.get("is_shadow", False)),
+                        llm_call_id=str(payload.get("llm_call_id", "") or ""),
+                    )
+                    return HookRuntimeResponse(decision="ack").model_dump_json()
+                except Exception:
+                    logger.exception(
+                        "publish_delegation_event failed for correlation_id=%s",
+                        payload.get("correlation_id"),
+                    )
+                    return HookRuntimeResponse(
+                        decision="ack",
+                        message="publish failed — logged",
+                    ).model_dump_json()
+            else:
+                logger.warning("publish_delegation_event: bus not ready — skipping")
+                return HookRuntimeResponse(
+                    decision="ack",
+                    message="bus not ready",
+                ).model_dump_json()
 
         # Unknown action — pass through
         logger.warning("Unknown action: %s", req.action)

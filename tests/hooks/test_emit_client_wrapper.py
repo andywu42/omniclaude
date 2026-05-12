@@ -95,7 +95,7 @@ class TestModuleImport:
             "friction.observed",  # OMN-5747 - Contract-driven friction classification output
             "utilization.scoring.requested",  # OMN-5505 - Utilization scoring command emitted from Stop hook
             "task.delegated",  # OMN-5610 - Delegation event for omnidash delegation_events table
-            "delegation.request",  # OMN-7040 - Delegation request command for node_delegation_orchestrator
+            "delegate.task",  # OMN-7040/OMN-10050 - Delegation request command for node_delegation_orchestrator
             "plan.review.completed",  # OMN-6128 - Plan review strategy run completed
             "hostile.reviewer.completed",  # OMN-6188 - Multi-model hostile review result
             "hostile.reviewer.failed",  # OMN-6188 - Multi-model hostile review failure
@@ -108,6 +108,7 @@ class TestModuleImport:
             "hook.health.error",  # OMN-7158 - Structured hook error event for health observability
             "llm.cost.completed",  # OMN-7570 - LLM cost telemetry for omnidash llm_cost_aggregates
             "agent.action",  # wire-missing-producers - Per-tool agent action
+            "diagnostic.daemon.health",  # OMN-10126 - Runtime daemon health probe
         }
         assert expected_types == SUPPORTED_EVENT_TYPES
 

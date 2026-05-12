@@ -12,7 +12,17 @@
 
 set -euo pipefail
 _OMNICLAUDE_HOOK_NAME="$(basename "${BASH_SOURCE[0]}")"
+
+# --- Kill-switch [OMN-9140] ---
+# OMNICLAUDE_HOOKS_DISABLE=1 or ~/.claude/omniclaude-hooks-disabled short-circuits
+# BEFORE any enforcement. Emergency unblock without plugin uninstall.
+if [[ "${OMNICLAUDE_HOOKS_DISABLE:-0}" == "1" ]] || [[ -f "${HOME}/.claude/omniclaude-hooks-disabled" ]]; then
+    cat >/dev/null || true
+    exit 0
+fi
+
 source "$(dirname "${BASH_SOURCE[0]}")/error-guard.sh" 2>/dev/null || true
+onex_hook_gate POST_SKILL_DELEGATION_ENFORCER || exit 0
 # shellcheck source=hook-runtime-client.sh
 source "$(dirname "${BASH_SOURCE[0]}")/hook-runtime-client.sh" 2>/dev/null || true
 
@@ -20,6 +30,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/hook-runtime-client.sh" 2>/dev/null || tr
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _MODE_SH="${_SCRIPT_DIR}/../../lib/mode.sh"
 if [[ -f "$_MODE_SH" ]]; then source "$_MODE_SH"; [[ "$(omniclaude_mode)" == "lite" ]] && exit 0; fi
+
+# Resolve PLUGIN_ROOT before cd changes CWD (BASH_SOURCE[0] relative paths break after cd).
+_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "${_SCRIPT_DIR}/../.." && pwd)}"
 unset _SCRIPT_DIR _MODE_SH
 
 cd "$HOME" 2>/dev/null || cd /tmp || true
@@ -44,6 +57,27 @@ fi
 SKILL_NAME=$(echo "$TOOL_INFO" | jq -r '.tool_input.skill // .tool_input.name // "unknown"' 2>/dev/null) || SKILL_NAME="unknown"
 SESSION_ID=$(echo "$TOOL_INFO" | jq -r '.session_id // .sessionId // ""' 2>/dev/null) || SESSION_ID=""
 
+# Opt-out: foreground orchestrator skills bypass the delegation enforcer.
+# If the skill's SKILL.md contains `foreground_orchestrator: true` in its YAML
+# frontmatter, the LLM must orchestrate inline — it cannot delegate to a subagent
+# because subagents cannot call Agent() themselves (confirmed in
+# feedback_dispatch_worker_subagent_limitation.md).
+
+# Strip plugin namespace prefix (e.g. "onex:epic_team" → "epic_team")
+_BARE_SKILL_NAME="${SKILL_NAME#*:}"
+_SKILL_MD="${_PLUGIN_ROOT}/skills/${_BARE_SKILL_NAME}/SKILL.md"
+
+if [[ -f "$_SKILL_MD" ]]; then
+    # Extract first YAML frontmatter block (between first pair of --- delimiters)
+    if awk '/^---$/{c++; if(c==2) exit; next} c==1{print}' "$_SKILL_MD" \
+        | grep -qE '^foreground_orchestrator:[[:space:]]*true[[:space:]]*$'; then
+        # Foreground orchestrator: skip enforcement, emit empty no-op output
+        jq -n '{hookSpecificOutput: {}}'
+        exit 0
+    fi
+fi
+unset _BARE_SKILL_NAME _SKILL_MD _PLUGIN_ROOT
+
 # Notify daemon that a skill was loaded (tightens thresholds) [OMN-5308]
 if [[ -n "$SESSION_ID" ]]; then
     _hrt_request "{\"action\":\"set_skill_loaded\",\"session_id\":\"${SESSION_ID}\",\"payload\":{}}" > /dev/null 2>&1 || true
@@ -55,7 +89,8 @@ jq -n \
     --arg skill_name "$SKILL_NAME" \
     '{
         hookSpecificOutput: {
-            additionalContext: ("⛔ DELEGATION ENFORCER — skill [" + $skill_name + "] loaded.\n\nYou MUST delegate this work to a subagent. Your FIRST and ONLY action must be:\n\n  Agent(subagent_type=\"onex:polymorphic-agent\", prompt=\"<full skill prompt here>\", description=\"<5-word description>\")\n\nDo NOT read files, run bash, make plans, or execute any steps yourself.\nDo NOT summarize the skill and then do the work inline.\nDo NOT narrate what you are about to do — just spawn the agent.\n\nException: informational skills (e.g. onex:using-superpowers, onex:onex-status) that only return information without doing work may be handled inline.")
+            hookEventName: "PostToolUse",
+            additionalContext: ("⛔ DELEGATION ENFORCER — skill [" + $skill_name + "] loaded.\n\nYou MUST delegate this work to a subagent. Your FIRST and ONLY action must be:\n\n  Agent(subagent_type=\"general-purpose\", prompt=\"<full skill prompt here>\", description=\"<5-word description>\")\n\nDo NOT read files, run bash, make plans, or execute any steps yourself.\nDo NOT summarize the skill and then do the work inline.\nDo NOT narrate what you are about to do — just spawn the agent.\n\nException: informational skills (e.g. onex:using-superpowers, onex:onex-status) that only return information without doing work may be handled inline.")
         }
     }'
 

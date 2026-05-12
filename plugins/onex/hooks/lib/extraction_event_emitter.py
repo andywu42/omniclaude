@@ -23,7 +23,7 @@ CLI Usage::
     echo '{
         "session_id": "uuid",
         "correlation_id": "uuid",
-        "agent_name": "polymorphic-agent",
+        "agent_name": "general-purpose",
         "agent_match_score": 0.95,
         "cohort": "treatment",
         "injection_occurred": true,
@@ -85,8 +85,9 @@ except ImportError as _import_err:
     sys.stderr.write(
         f"[extraction_event_emitter] import failed: {_import_err}\n"
         "  Extraction events will not be emitted.\n"
-        "  Fix: rebuild the plugin venv — "
-        "${CLAUDE_PLUGIN_ROOT}/skills/deploy-local-plugin/deploy.sh --repair-venv\n"
+        "  Fix: reinstall the plugin — "
+        "claude plugin uninstall onex@omninode-tools && "
+        "claude plugin install onex@omninode-tools\n"
     )
     _emit_event = None
     del _import_err

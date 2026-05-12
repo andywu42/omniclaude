@@ -8,6 +8,8 @@
 # (e.g., pre-commit hook failure) and the agent proceeds as if it succeeded.
 
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/hook-gate.sh" 2>/dev/null || true
+onex_hook_gate POST_TOOL_COMMIT_VERIFY || exit 0
 
 # Read tool input from stdin
 INPUT=$(cat)
@@ -40,6 +42,7 @@ fi
 # Inject the verification reminder into hookSpecificOutput so Claude sees it.
 echo "$INPUT" | jq --arg msg "$MSG" '
   .hookSpecificOutput = (.hookSpecificOutput // {}) |
+  .hookSpecificOutput.hookEventName = "PostToolUse" |
   .hookSpecificOutput.message = (
     [(.hookSpecificOutput.message // ""), $msg]
     | map(select(length > 0))

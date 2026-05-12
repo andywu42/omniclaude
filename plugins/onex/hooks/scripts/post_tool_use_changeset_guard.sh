@@ -19,10 +19,8 @@ if [[ "${OMNICLAUDE_HOOKS_DISABLED:-0}" == "1" ]]; then
     cat  # drain stdin
     exit 0
 fi
-if [[ "${OMNICLAUDE_HOOK_CHANGESET_GUARD:-1}" == "0" ]]; then
-    cat  # drain stdin
-    exit 0
-fi
+source "$(dirname "${BASH_SOURCE[0]}")/hook-gate.sh" 2>/dev/null || true
+onex_hook_gate CHANGESET_GUARD_POST || exit 0
 
 # -----------------------------------------------------------------------
 # Read stdin (Claude Code PostToolUse JSON)
@@ -81,6 +79,7 @@ printf '{"timestamp":"%s","event":"large_changeset","file_count":%d,"threshold":
 MODIFIED=$(printf '%s' "$TOOL_INFO" | jq \
     --arg warning "$WARNING" \
     '.hookSpecificOutput = (.hookSpecificOutput // {}) |
+     .hookSpecificOutput.hookEventName = "PostToolUse" |
      .hookSpecificOutput.additionalContext = (
        ((.hookSpecificOutput.additionalContext // "") + "\n\n" + $warning)
        | ltrimstr("\n\n")

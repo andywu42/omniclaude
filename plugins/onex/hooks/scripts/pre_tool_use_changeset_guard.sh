@@ -19,10 +19,8 @@ if [[ "${OMNICLAUDE_HOOKS_DISABLED:-0}" == "1" ]]; then
     cat  # drain stdin
     exit 0
 fi
-if [[ "${OMNICLAUDE_HOOK_CHANGESET_GUARD:-1}" == "0" ]]; then
-    cat  # drain stdin
-    exit 0
-fi
+source "$(dirname "${BASH_SOURCE[0]}")/hook-gate.sh" 2>/dev/null || true
+onex_hook_gate CHANGESET_GUARD_PRE || exit 0
 
 # -----------------------------------------------------------------------
 # Read stdin (Claude Code PreToolUse JSON)
@@ -70,6 +68,7 @@ printf '{"timestamp":"%s","event":"broad_staging","command":"%s"}\n' \
 MODIFIED=$(printf '%s' "$TOOL_INFO" | jq \
     --arg warning "$WARNING" \
     '.hookSpecificOutput = (.hookSpecificOutput // {}) |
+     .hookSpecificOutput.hookEventName = "PreToolUse" |
      .hookSpecificOutput.additionalContext = (
        ((.hookSpecificOutput.additionalContext // "") + "\n\n" + $warning)
        | ltrimstr("\n\n")

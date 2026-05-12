@@ -34,6 +34,7 @@ unset _SELF SCRIPT_DIR
 HOOKS_DIR="${PLUGIN_ROOT}/hooks"
 HOOKS_LIB="${HOOKS_DIR}/lib"
 source "${HOOKS_DIR}/scripts/common.sh"
+onex_hook_gate DOD_COMPLETION_GUARD || exit 0
 source "$(dirname "${BASH_SOURCE[0]}")/onex-paths.sh" || { echo "ONEX_STATE_DIR not set" >&2; exit 1; }
 LOG_FILE="${ONEX_HOOK_LOG}"
 
@@ -87,13 +88,63 @@ if [[ -z "$TICKET_ID" ]]; then
     exit 0
 fi
 
-# Check for evidence receipt
-EVIDENCE_DIR=".evidence/$TICKET_ID"
+# Resolve evidence receipt location — configuration-driven, no hardcoded layout.
+#
+# REQUIRED env var: ONEX_EVIDENCE_ROOT — absolute path to the evidence root dir.
+# Receipts are written to: $ONEX_EVIDENCE_ROOT/<ticket>/dod_report.json
+#
+# Env var policy (fail-open vs fail-closed):
+#   UNSET    → fail-open (exit 0) + visible warning. Fresh dev environments may
+#              not have ~/.omnibase/.env sourced yet; blocking them entirely
+#              defeats hook adoption. Configure via: export ONEX_EVIDENCE_ROOT=<path>
+#   SET, non-absolute path → fail-closed (exit 2). Relative paths are a
+#              misconfiguration — the hook cannot reliably resolve them across
+#              shell contexts. Fix: use an absolute path starting with '/'.
+#   SET, absolute but non-existent/non-dir → fail-closed (exit 2). Env var is
+#              set but points at the wrong place — silent fallback would mask the
+#              misconfiguration.
+if [[ -z "${ONEX_EVIDENCE_ROOT:-}" ]]; then
+    echo "WARNING [dod-guard]: ONEX_EVIDENCE_ROOT is not set — DoD completion guard is INACTIVE." >&2
+    echo "         To activate: add 'export ONEX_EVIDENCE_ROOT=<absolute-path-to-evidence-dir>'" >&2
+    echo "         to ~/.omnibase/.env and re-source it. Allowing this tool call." >&2
+    exit 0
+fi
+
+if [[ "${ONEX_EVIDENCE_ROOT}" != /* ]]; then
+    echo "ERROR [dod-guard]: ONEX_EVIDENCE_ROOT='${ONEX_EVIDENCE_ROOT}' is not an absolute path." >&2
+    echo "       Relative paths cannot be safely resolved across shell contexts." >&2
+    echo "       Fix: set ONEX_EVIDENCE_ROOT to an absolute path starting with '/'." >&2
+    exit 2
+fi
+
+if [[ ! -d "$ONEX_EVIDENCE_ROOT" ]]; then
+    echo "ERROR [dod-guard]: ONEX_EVIDENCE_ROOT='${ONEX_EVIDENCE_ROOT}' is set but does not exist or is not a directory." >&2
+    echo "       Fix: create the directory or correct the path in ~/.omnibase/.env." >&2
+    exit 2
+fi
+
+EVIDENCE_DIR="$ONEX_EVIDENCE_ROOT/$TICKET_ID"
 RECEIPT_PATH="$EVIDENCE_DIR/dod_report.json"
 
 POLICY_MODE="${DOD_ENFORCEMENT_MODE:-hard}"
 
-# Check if receipt exists and is fresh (< 30 minutes old)
+# Validate receipt against ModelDodReceipt schema (OMN-9792 migration).
+#
+# Fail-closed policy (OMN-10540 + OMN-10541): Only an explicit `status == "PASS"`
+# with a fresh, parseable, ModelDodReceipt-shaped receipt permits the Done
+# transition. Any of these conditions block:
+#   - missing receipt file
+#   - parse failure (bad JSON)
+#   - missing required keys (run_timestamp, status)
+#   - legacy schema (top-level `timestamp` or `result` keys, no `run_timestamp`)
+#   - status != PASS (FAIL, ADVISORY, PENDING, or any other value)
+#   - run_timestamp older than 30 minutes
+#
+# Legacy schema (`timestamp` + `result.failed`) is rejected outright rather than
+# migrated forward: the receipt writer in skills/_lib/dod-evidence-runner now
+# emits ModelDodReceipt fields. A receipt with legacy keys means either the
+# writer regressed or the receipt was hand-crafted — neither should satisfy
+# the gate.
 RECEIPT_CHECK=$(python3 -c "
 import json, sys, os
 from datetime import datetime, timezone, timedelta
@@ -106,30 +157,62 @@ if not os.path.exists(receipt_path):
 try:
     with open(receipt_path) as f:
         receipt = json.load(f)
-
-    # Check freshness (30 minute window)
-    timestamp = receipt.get('timestamp', '')
-    if timestamp:
-        receipt_time = datetime.fromisoformat(timestamp)
-        age = datetime.now(tz=timezone.utc) - receipt_time
-        if age > timedelta(minutes=30):
-            print('stale')
-            sys.exit(0)
-
-    # Check for failures
-    result = receipt.get('result', {})
-    if result.get('failed', 0) > 0:
-        print('has_failures')
-        sys.exit(0)
-
-    print('valid')
 except Exception as e:
-    print(f'error:{e}')
+    print(f'parse_error:{e}')
+    sys.exit(0)
+
+if not isinstance(receipt, dict):
+    print('parse_error:receipt is not a JSON object')
+    sys.exit(0)
+
+# Reject legacy schema outright. Either top-level 'result' or a top-level
+# 'timestamp' without 'run_timestamp' indicates pre-OMN-9792 format.
+has_run_timestamp = 'run_timestamp' in receipt
+if 'result' in receipt or ('timestamp' in receipt and not has_run_timestamp):
+    print('legacy_schema')
+    sys.exit(0)
+
+# Required ModelDodReceipt keys for the guard.
+if not has_run_timestamp:
+    print('missing_run_timestamp')
+    sys.exit(0)
+if 'status' not in receipt:
+    print('missing_status')
+    sys.exit(0)
+
+run_ts = receipt.get('run_timestamp')
+if not isinstance(run_ts, str) or not run_ts.strip():
+    print('missing_run_timestamp')
+    sys.exit(0)
+try:
+    receipt_time = datetime.fromisoformat(run_ts)
+except Exception:
+    print('parse_error:run_timestamp is not ISO-8601')
+    sys.exit(0)
+if receipt_time.tzinfo is None:
+    print('parse_error:run_timestamp must be timezone-aware')
+    sys.exit(0)
+age = datetime.now(tz=timezone.utc) - receipt_time
+if age > timedelta(minutes=30):
+    print('stale')
+    sys.exit(0)
+
+status = receipt.get('status')
+if not isinstance(status, str):
+    print('missing_status')
+    sys.exit(0)
+status_norm = status.strip().upper()
+if status_norm == 'PASS':
+    print('valid')
+elif status_norm in ('FAIL', 'ADVISORY', 'PENDING'):
+    print(f'status_not_pass:{status_norm}')
+else:
+    print(f'status_not_pass:UNKNOWN({status!r})')
 " 2>/dev/null || echo "error")
 
 case "$RECEIPT_CHECK" in
     valid)
-        # Receipt exists, fresh, no failures — allow
+        # Receipt exists, fresh, ModelDodReceipt-shaped, status=PASS — allow
         exit 0
         ;;
     missing)
@@ -138,8 +221,20 @@ case "$RECEIPT_CHECK" in
     stale)
         REASON="DoD evidence receipt is stale (>30 minutes old). Run /dod-verify $TICKET_ID to refresh."
         ;;
-    has_failures)
-        REASON="DoD evidence receipt has failed checks. Fix failures and run /dod-verify $TICKET_ID."
+    legacy_schema)
+        REASON="DoD evidence receipt at $RECEIPT_PATH uses pre-OMN-9792 schema (legacy 'timestamp'/'result' keys). Re-run /dod-verify $TICKET_ID to produce a ModelDodReceipt-shaped receipt."
+        ;;
+    missing_run_timestamp)
+        REASON="DoD evidence receipt at $RECEIPT_PATH is missing required 'run_timestamp'. Re-run /dod-verify $TICKET_ID."
+        ;;
+    missing_status)
+        REASON="DoD evidence receipt at $RECEIPT_PATH is missing required 'status'. Re-run /dod-verify $TICKET_ID."
+        ;;
+    status_not_pass:*)
+        REASON="DoD evidence receipt at $RECEIPT_PATH has status='${RECEIPT_CHECK#status_not_pass:}', only 'PASS' permits Done. Fix failures and re-run /dod-verify $TICKET_ID."
+        ;;
+    parse_error:*)
+        REASON="Could not parse DoD evidence receipt at $RECEIPT_PATH: ${RECEIPT_CHECK#parse_error:}"
         ;;
     *)
         REASON="Could not read DoD evidence receipt: $RECEIPT_CHECK"
@@ -158,14 +253,23 @@ receipt_path = '$RECEIPT_PATH'
 try:
     with open(receipt_path) as f:
         receipt = json.load(f)
-    ts = receipt.get('timestamp', '')
+    if not isinstance(receipt, dict):
+        raise ValueError('receipt not an object')
+    # Prefer ModelDodReceipt's run_timestamp; fall back to legacy 'timestamp'
+    # only for telemetry purposes (the receipt-validation block above already
+    # rejects legacy-shaped receipts).
+    ts = receipt.get('run_timestamp') or receipt.get('timestamp', '')
     if ts:
         receipt_time = datetime.fromisoformat(ts)
         age = (datetime.now(tz=timezone.utc) - receipt_time).total_seconds()
     else:
         age = -1
-    result = receipt.get('result', {})
-    passed = result.get('failed', 0) == 0
+    status = receipt.get('status')
+    if isinstance(status, str):
+        passed = status.strip().upper() == 'PASS'
+    else:
+        # Legacy fallback for telemetry only.
+        passed = receipt.get('result', {}).get('failed', 0) == 0
     print(json.dumps({'age': age, 'pass': passed}))
 except Exception:
     print(json.dumps({'age': -1, 'pass': False}))
@@ -176,7 +280,7 @@ fi
 
 emit_guard_event() {
     local guard_outcome="$1"
-    local session_id="${CLAUDE_SESSION_ID:-}"
+    local session_id="${CLAUDE_CODE_SESSION_ID:-}"
     local timestamp
     timestamp=$(python3 -c "from datetime import datetime, timezone; print(datetime.now(tz=timezone.utc).isoformat())" 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ")
 

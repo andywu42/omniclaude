@@ -26,30 +26,29 @@ jobs:
     name: validate-pr-contracts
     runs-on: >-
       ${{
-        (vars.USE_SELF_HOSTED_RUNNERS == 'true' &&
-         (github.event_name == 'push' ||
-          github.event_name == 'workflow_dispatch' ||
-          github.event_name == 'schedule'))
-        && fromJSON('["self-hosted","omnibase-ci"]')
-        || fromJSON('["ubuntu-latest"]')
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
       }}
     timeout-minutes: 5
 
     steps:
       - name: Skip merge_group events
         if: github.event_name == 'merge_group'
+        working-directory: ${{ github.workspace }}
         run: |
           echo "::notice::merge_group event — validate-pr-contracts skipped."
 
       - name: Checkout
         if: github.event_name != 'merge_group'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Checkout omnibase_infra (for validation script)
         if: github.event_name != 'merge_group'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: OmniNode-ai/omnibase_infra
           path: _omnibase_infra
@@ -57,12 +56,13 @@ jobs:
 
       - name: Set up Python
         if: github.event_name != 'merge_group'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Install PyYAML
         if: github.event_name != 'merge_group'
+        working-directory: ${{ github.workspace }}
         run: pip install pyyaml
 
       - name: Gather PR metadata
@@ -71,6 +71,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+        working-directory: ${{ github.workspace }}
         run: |
           gh pr view "$PR_NUMBER" --json body -q .body > /tmp/pr_body.txt || true
           gh pr diff "$PR_NUMBER" --name-only > /tmp/diff_files.txt || true
@@ -84,6 +85,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY_PATH: /tmp/pr_body.txt
           CONTRACTS_PATH: contracts
+        working-directory: ${{ github.workspace }}
         run: |
           # Read file contents into env vars for the script
           export PR_DIFF_FILES="$(cat /tmp/diff_files.txt 2>/dev/null || echo '')"
@@ -107,6 +109,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+        working-directory: ${{ github.workspace }}
         run: |
           BODY="## ⚠️ Contract Validation Findings (warn-only)
 
@@ -121,6 +124,7 @@ jobs:
       # Phase 1: always exit 0 (warn-only)
       - name: Gate result (warn-only)
         if: github.event_name != 'merge_group'
+        working-directory: ${{ github.workspace }}
         run: |
           echo "::notice::validate-pr-contracts completed (warn-only mode). Exit code from validation: ${{ steps.validate.outputs.exit_code }}"
           exit 0

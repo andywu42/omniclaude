@@ -1,7 +1,7 @@
 ---
 description: End-to-end design workflow — brainstorm ideas into structured implementation plans with optional launch
 mode: full
-version: 1.0.0
+version: 1.1.0
 level: intermediate
 debug: false
 category: planning
@@ -33,6 +33,83 @@ End-to-end design workflow with three phases:
 3. **Launch**: Route to execution (ticket-pipeline or plan-to-tickets + epic-team)
 
 **Announce at start:** "I'm using the design-to-plan skill [Phase N: <phase name>]."
+
+---
+
+## Output Format Contract (OMN-10353)
+
+**This contract is enforced on every plan file produced by this skill. Violations are bugs.**
+
+### Required heading structure
+
+Every numbered implementation task MUST appear as an H2 heading:
+
+```
+## Task N: <title>
+```
+
+Each task body MUST contain all of:
+- **Why**: one-sentence rationale for the task
+- **Files**: exact file paths (Create / Modify / Test)
+- **Steps**: numbered bite-sized steps (2–5 min each)
+- **Acceptance**: verifiable acceptance criteria (no subjective language)
+- **Verification grade**: `strong` / `medium` / `weak` as defined in R6
+
+### Forbidden structures
+
+The following are **FORBIDDEN** in any plan written by this skill:
+
+| Forbidden pattern | Reason |
+|---|---|
+| Blockquote placeholder (`> Task N: ...`) | `plan_to_tickets` regex does not match blockquotes |
+| `### TRACK X — Y (Tasks N-M)` without sibling `## Task N:` headings | Placeholder, not parseable |
+| Bullet-list-only task summaries (`- Task N: ...`) | Not matched by `plan_to_tickets` |
+| `## Phase N:` headings as task containers | Wrong heading format; flatten into `## Task N:` |
+| Numbered flat list (`1. Create X`) | Not matched by `plan_to_tickets` |
+
+### Foreground blocking on agent sub-task delegation
+
+When sub-task generation is delegated to background agents (via `Agent()`, `Task`, or skill calls),
+the foreground session **MUST block** on each agent before writing the plan file:
+
+1. Poll agent output via `TaskGet` / `TaskOutput` in a loop.
+2. Default max wait: **5 minutes per agent** (configurable via `--agent-timeout-minutes N`).
+3. On agent timeout or failure, the foreground writes a failure-placeholder heading:
+
+```markdown
+## Task N: <title> [GENERATION-FAILED — agent <agent-id> timed out at <ISO-timestamp>]
+
+**Failure mode:** Agent `<agent-id>` did not return within the configured timeout.
+
+**Recovery:** Re-run `design_to_plan --phase plan` and paste the agent output for this
+track manually, or run `/onex:design_to_plan --phase plan --topic "<track title>"` to
+regenerate this track.
+```
+
+**Never write a blockquote placeholder** (`> Track 1A tasks here...`) — always write either a
+complete `## Task N:` heading body or the explicit `[GENERATION-FAILED]` failure header above.
+
+### Pre-write linter (mandatory)
+
+Before calling `Write()` on any plan file, parse the draft plan and validate:
+
+1. Identify every track section and its associated numbered task list.
+2. For every task number N referenced in a track's numbered list, confirm a `## Task N:` H2
+   heading exists in the document.
+3. If any task is missing its `## Task N:` heading: **do not write the file**. Instead, either:
+   - Generate the missing task sections inline, or
+   - Emit `[GENERATION-FAILED]` placeholder headings (see above).
+4. Emit a validation summary line before writing:
+   ```
+   [design_to_plan pre-write linter] N tasks found, N/N have ## Task N: headings — OK
+   ```
+   or:
+   ```
+   [design_to_plan pre-write linter] FAILED: tasks [3, 7, 12] missing ## Task N: headings
+   — writing GENERATION-FAILED placeholders (OMN-10353)
+   ```
+
+This linter step runs on **every** plan Write(), including partial saves during generation.
 
 ---
 
@@ -110,17 +187,23 @@ Assume they are a skilled developer, but know almost nothing about our toolset o
 
 ### HARD FORMAT REQUIREMENT
 
-**Every implementation item MUST be a `## Task N:` heading (H2 level).** This is non-negotiable — `plan-to-tickets` parses this exact format. Plans that use any other structure (numbered lists, `### Phase` sub-headings, bullet items, `## Phase N:`) will fail downstream ticketization.
+**Every implementation item MUST be a `## Task N:` heading (H2 level).** This is non-negotiable — `plan-to-tickets` parses this exact format. Plans that use any other structure will fail downstream ticketization.
 
 **Validation contract:** `ModelPlanDocument` from `omnibase_core.models.plan` is the validation target for every plan produced by this skill. A plan that cannot be parsed into a `ModelPlanDocument` is a failure — regenerate the offending sections before proceeding.
 
 - **DO**: `## Task 1: Create autopilot SKILL.md specification`
 - **DO**: `## Task 2: Implement state management`
-- **DON'T**: `### Phase 1:` with numbered items inside
+- **DO**: `## Task 15: [Wave 2] Register Kafka topics` — embed wave/phase context in the task title if needed
+- **DON'T**: `### Wave 1:` or `### Wave N:` headers used as task headings — these are H3 and will NOT be detected by `plan-to-tickets`
+- **DON'T**: `### Phase 1:` with numbered items inside — same problem, H3 level is invisible to the parser
+- **DON'T**: `- **T1**` or `- **TX**` bullet items as task entries — bullets are not parsed as tasks
 - **DON'T**: `1. Create SKILL.md` as a flat numbered list
 - **DON'T**: `## Implementation Sequence` with sub-sections
+- **DON'T**: `## Wave N:` as a grouping header that contains the actual tasks — the wave heading itself is not a task
 
-If the design has phases (e.g., "Phase 1: Core", "Phase 2: Dashboard"), flatten them into sequential `## Task N:` headings. Use the task title to indicate the phase if helpful: `## Task 15: [Phase 2] Register Kafka topics`.
+**Grouping headers are allowed between tasks** (e.g., `### Wave 1 — Core Infrastructure` between `## Task 3:` and `## Task 4:`) but ONLY if they contain no implementation items. Every implementation item must be its own `## Task N:` heading.
+
+If the design has waves or phases (e.g., "Wave 1: Core", "Wave 2: Dashboard"), flatten them into sequential `## Task N:` headings. Use the task title to indicate the wave/phase if helpful: `## Task 15: [Wave 2] Register Kafka topics`.
 
 **Post-plan validation**: After writing the plan, parse it through `ModelPlanDocument` (from `omnibase_core.models.plan`). If parsing fails, regenerate the offending sections before proceeding to the adversarial review. Specifically:
 
@@ -596,13 +679,15 @@ If the review instructions do not catch all seven expected items, tighten the in
 
 ### Multi-Model Adversarial Review (Phase 2c)
 
+> **[OMN-10111] DISABLED:** hostile_reviewer is currently disabled pending eval framework validation. Skip this step entirely. Do NOT invoke. Re-enable when OMN-10111 closes.
+
 After R1-R8 converges (Phase 2b), invoke the hostile-reviewer skill in file mode for
 an independent adversarial challenge from non-Claude models (DeepSeek-R1, Qwen3-Coder).
 
 **Flow:**
 
 1. R1-R8 converges (Phase 2b complete)
-2. Invoke `/hostile-reviewer --file <plan_file_path>`
+2. ~~Invoke `/hostile-reviewer --file <plan_file_path>`~~ **DISABLED per OMN-10111**
 3. Triage external findings (see policy below)
 4. If actionable CRITICAL/MAJOR with concrete evidence: run ONE additional R1-R8 pass
 5. If only MINOR/NIT: note them and proceed to Phase 3
@@ -651,6 +736,8 @@ Record in the plan output or review artifact:
 ---
 
 ### Mandatory Phase 2→3 Gate: ONEX Pattern Review
+
+> **[OMN-10111] DISABLED:** hostile_reviewer is currently disabled pending eval framework validation. Skip this gate entirely. Do NOT invoke. Proceed directly to Phase 3. Re-enable when OMN-10111 closes.
 
 **This gate is mandatory and blocks Phase 3 launch. It cannot be skipped or silently passed.**
 

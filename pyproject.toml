@@ -10,9 +10,10 @@ license = { text = "MIT" }
 authors = [{ name = "OmniNode.ai", email = "contact@omninode.ai" }]
 keywords = ["omninode", "claude", "plugin", "hooks", "skills", "onex", "agents"]
 dependencies = [
-    "omnibase-core==0.39.0",
-    "omnibase-spi==0.20.4",
-    "omnibase-infra==0.32.0",
+    "omnibase-core==0.40.1",
+    "omnibase-spi==0.20.6",
+    "omnibase-infra==0.34.2",
+    "omnimarket>=0.1.0",
     "omninode-intelligence==0.23.0",
     "pydantic>=2.12.5,<3.0.0",
     "pydantic-settings>=2.6.0,<3.0.0",
@@ -21,13 +22,14 @@ dependencies = [
     "httpx>=0.27.0",
     "tiktoken>=0.5.0",
     "psutil>=5.9.0",
+    "pyyaml>=6.0.0",
 ]
 
 [project.optional-dependencies]
 # aiokafka is optional: event publishers gracefully degrade when not installed.
 # Minimum version 0.11.0 required for Python 3.12 support.
 kafka = [
-    "aiokafka>=0.11.0,<0.14.0",
+    "aiokafka>=0.11.0,<0.15.0",
     "confluent-kafka>=2.12.0,<3.0.0",
 ]
 
@@ -47,6 +49,27 @@ hooks = [
 
 # discord is optional: Discord channel adapter for OmniClaw (OMN-7189).
 discord = [
+    "discord.py>=2.3.0,<3.0.0",
+]
+
+# skills is optional: runtime event pipeline for skill dispatch (Kafka + OTEL).
+# R-class skills that dispatch via onex run require kafka; OTEL adds observability.
+skills = [
+    "aiokafka>=0.11.0,<0.15.0",
+    "confluent-kafka>=2.12.0,<3.0.0",
+    "opentelemetry-api>=1.23.0,<2.0.0",
+    "opentelemetry-sdk>=1.23.0,<2.0.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.23.0,<2.0.0",
+]
+
+# full bundles all optional feature sets for a complete local development install.
+full = [
+    "aiokafka>=0.11.0,<0.15.0",
+    "confluent-kafka>=2.12.0,<3.0.0",
+    "opentelemetry-api>=1.23.0,<2.0.0",
+    "opentelemetry-sdk>=1.23.0,<2.0.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.23.0,<2.0.0",
+    "valkey>=6.0",
     "discord.py>=2.3.0,<3.0.0",
 ]
 
@@ -154,10 +177,10 @@ node_skill_hook_health_alert_orchestrator = "omniclaude.nodes.node_skill_hook_he
 node_skill_hostile_reviewer_orchestrator = "omniclaude.nodes.node_skill_hostile_reviewer_orchestrator"
 node_skill_insights_to_plan_orchestrator = "omniclaude.nodes.node_skill_insights_to_plan_orchestrator"
 node_skill_integration_sweep_orchestrator = "omniclaude.nodes.node_skill_integration_sweep_orchestrator"
-node_skill_linear_epic_org_orchestrator = "omniclaude.nodes.node_skill_linear_epic_org_orchestrator"
 node_skill_linear_housekeeping_orchestrator = "omniclaude.nodes.node_skill_linear_housekeeping_orchestrator"
-node_skill_linear_insights_orchestrator = "omniclaude.nodes.node_skill_linear_insights_orchestrator"
-node_skill_linear_triage_orchestrator = "omniclaude.nodes.node_skill_linear_triage_orchestrator"
+node_skill_ticketing_epic_org_orchestrator = "omniclaude.nodes.node_skill_ticketing_epic_org_orchestrator"
+node_skill_ticketing_insights_orchestrator = "omniclaude.nodes.node_skill_ticketing_insights_orchestrator"
+node_skill_ticketing_triage_orchestrator = "omniclaude.nodes.node_skill_ticketing_triage_orchestrator"
 node_skill_local_review_orchestrator = "omniclaude.nodes.node_skill_local_review_orchestrator"
 node_skill_login_orchestrator = "omniclaude.nodes.node_skill_login_orchestrator"
 node_skill_merge_sweep_orchestrator = "omniclaude.nodes.node_skill_merge_sweep_orchestrator"
@@ -216,14 +239,15 @@ build-backend = "hatchling.build"
 # Override omninode-intelligence's transitive pin on omnibase-infra so our direct pin wins.
 # Required until omniintelligence publishes a release with >=0.24.1.
 override-dependencies = [
-    "omnibase-core==0.39.0",
-    "omnibase-spi==0.20.4",
-    "omnibase-infra==0.32.0",
+    "omnibase-core==0.40.1",
+    "omnibase-spi==0.20.6",
+    "omnibase-infra==0.34.2",
 ]
 
 [tool.uv.sources]
 onex-change-control = { git = "https://github.com/OmniNode-ai/onex_change_control.git", branch = "main" }
 omninode-intelligence = { git = "https://github.com/OmniNode-ai/omniintelligence.git", tag = "v0.23.0" }
+omnimarket = { git = "https://github.com/OmniNode-ai/omnimarket.git" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/omniclaude"]
@@ -491,6 +515,7 @@ ignore = [
 # and print() is the intended stdout output mechanism for CLI tools, hooks, and scripts
 "plugins/**/*.py" = ["BLE001", "T201"]
 "scripts/**/*.py" = ["BLE001", "T201"]
+".github/actions/**/*.py" = ["BLE001", "T201"]
 "consumers/**/*.py" = ["BLE001", "T201"]
 "shared_lib/**/*.py" = ["BLE001", "T201"]
 "examples/**/*.py" = ["T201"]
@@ -498,7 +523,6 @@ ignore = [
 # Note: src/omniclaude/lib/ is fully excluded in [tool.ruff] exclude - legacy code, will be deleted post-Beta
 # CLI entrypoints — intentional user-facing print() output
 "src/omniclaude/runtime/__main__.py" = ["T201"]
-"src/omniclaude/publisher/__main__.py" = ["T201"]
 # Subscribers use print() for CLI __main__ output and JSON stdout
 "src/omniclaude/hooks/lib/compliance_result_subscriber.py" = ["T201"]
 "src/omniclaude/hooks/lib/decision_record_subscriber.py" = ["T201"]

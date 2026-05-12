@@ -27,10 +27,21 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
-DONE_STATES = {"done", "complete", "completed", "closed", "canceled", "cancelled"}
+# States that require merged-PR proof before the transition is allowed.
+# These represent successful completion ("the work shipped").
+DONE_STATES = {"done", "complete", "completed", "closed"}
+
+# States that close a ticket WITHOUT shipping the underlying work
+# (cancel / duplicate / won't-do bucket). These do not require merged-PR
+# proof — the whole point of cancelling is that no PR will land.
+# Without this distinction, the hook misfires on tickets whose descriptions
+# happen to contain `PR #N` strings inside markdown code blocks (OMN-10047).
+CANCEL_STATES = {"canceled", "cancelled", "duplicate", "won't do", "wont do"}
 
 # `#123` not preceded by a word char (skip things like `abc#1` inside code);
 # also `https://github.com/<owner>/<repo>/pull/<num>`.
@@ -127,7 +138,21 @@ def is_exempt(description: str, labels: list[str] | None) -> bool:
 
 
 def is_done_state(state_value: str) -> bool:
+    """Return True if the target state requires merged-PR verification.
+
+    Only the success-bucket Done states count. Cancel/Duplicate/Won't-do
+    transitions are NOT verified against PR state — they explicitly close
+    a ticket without shipping work. See OMN-10047.
+    """
     return state_value.strip().lower() in DONE_STATES
+
+
+def is_cancel_state(state_value: str) -> bool:
+    """Return True if the target state is in the cancel/duplicate bucket.
+
+    These states close a ticket without requiring merged-PR proof.
+    """
+    return state_value.strip().lower() in CANCEL_STATES
 
 
 def fetch_pr_status(ref: PRRef, timeout: float = 15.0) -> PRStatus:
@@ -277,28 +302,74 @@ def _load_stdin_tool_call() -> dict[str, Any]:
     return {}
 
 
-def _fetch_linear_issue(ticket_id: str) -> dict[str, Any] | None:
-    """Fetch a Linear issue via the gh-linear shim if available.
+_LINEAR_GRAPHQL_QUERY = """
+query($id: String!) {
+  issue(id: $id) {
+    id
+    title
+    description
+    state { name }
+    labels { nodes { name } }
+  }
+}
+""".strip()
 
-    Returns None if the shim isn't available. The shim is wired only in
-    integration/dogfood environments; unit tests inject descriptions directly.
+_LINEAR_API_URL = "https://api.linear.app/graphql"
+
+
+def _fetch_linear_issue(ticket_id: str) -> dict[str, Any] | None:
+    """Fetch a Linear issue via the GraphQL API.
+
+    Returns None on network/auth failure so the caller can decide whether to
+    fail-open or fail-closed.  Missing LINEAR_API_KEY → fail-open (returns {}
+    so the hook does not block the user when credentials aren't configured).
     """
-    cmd = ["linear-cli", "get-issue", ticket_id]
-    try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=10.0, check=False
+    api_key = os.environ.get("LINEAR_API_KEY", "")
+    if not api_key:
+        sys.stderr.write(
+            "[linear_done_verify] LINEAR_API_KEY not set — skipping Live fetch, "
+            "failing open.\n"
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None
-    if proc.returncode != 0:
-        return None
+        return {}
+
+    payload = json.dumps(
+        {"query": _LINEAR_GRAPHQL_QUERY, "variables": {"id": ticket_id}}
+    ).encode()
+    req = urllib.request.Request(  # noqa: S310
+        _LINEAR_API_URL,
+        data=payload,
+        headers={
+            "Authorization": api_key,
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
     try:
-        parsed = json.loads(proc.stdout)
+        with urllib.request.urlopen(req, timeout=10.0) as resp:  # noqa: S310
+            if resp.status != 200:
+                return None
+            body = resp.read()
+    except (urllib.error.URLError, OSError):
+        # HTTPError (non-2xx) is a subclass of URLError and caught here too.
+        return None
+
+    try:
+        data = json.loads(body)
     except json.JSONDecodeError:
         return None
-    if isinstance(parsed, dict):
-        return parsed
-    return None
+
+    issue = (data.get("data") or {}).get("issue")
+    if not isinstance(issue, dict):
+        return None
+
+    label_nodes = (issue.get("labels") or {}).get("nodes") or []
+    return {
+        "id": issue.get("id"),
+        "title": issue.get("title"),
+        "description": issue.get("description") or "",
+        "state": (issue.get("state") or {}).get("name") or "",
+        "labels": [n.get("name") for n in label_nodes if n.get("name")],
+    }
 
 
 def main() -> int:
@@ -312,6 +383,10 @@ def main() -> int:
 
     params: dict[str, Any] = call.get("tool_input") or {}
     state_value = str(params.get("state") or params.get("status") or "")
+    # Cancel/Duplicate/Won't-do close the ticket without requiring a PR;
+    # short-circuit before any verification logic. (OMN-10047)
+    if is_cancel_state(state_value):
+        return 0
     if not is_done_state(state_value):
         return 0
 
@@ -320,12 +395,14 @@ def main() -> int:
     labels: list[str] = list(params.get("labels") or [])
 
     # If the description wasn't passed on this update (common: status-only
-    # updates), fetch the live ticket to read DoD references. Fail-closed: if
-    # the fetch fails we cannot tell whether a PR is referenced, so reject
-    # rather than let the Done transition through blind.
+    # updates), fetch the live ticket to read DoD references.
+    # Semantics of _fetch_linear_issue return values:
+    #   None  → network/API failure → fail-closed (block transition)
+    #   {}    → LINEAR_API_KEY missing → fail-open (skip PR check)
+    #   {...} → real issue data → use description + labels from response
     if not description and ticket_id:
         issue = _fetch_linear_issue(ticket_id)
-        if not issue:
+        if issue is None:
             decision = {
                 "decision": "block",
                 "reason": (

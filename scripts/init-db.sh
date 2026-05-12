@@ -29,8 +29,15 @@ fi
 # Default changed from 'postgres' to 'omniclaude' as part of DB-SPLIT-07 (OMN-2058)
 POSTGRES_DB="${POSTGRES_DB:-${POSTGRES_DATABASE:-omniclaude}}"
 
+PSQL_ARGS=(--username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --host="$POSTGRES_HOST")
+if [ -n "${POSTGRES_PORT:-}" ]; then
+    PSQL_ARGS+=(--port "$POSTGRES_PORT")
+elif [ -n "${PGPORT:-}" ]; then
+    PSQL_ARGS+=(--port "$PGPORT")
+fi
+
 # Create extensions and schema, then run migrations
-psql -v ON_ERROR_STOP=1 -v db_user="${POSTGRES_USER}" --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --host="$POSTGRES_HOST" <<-EOSQL
+psql -v ON_ERROR_STOP=1 -v db_user="${POSTGRES_USER}" "${PSQL_ARGS[@]}" <<-EOSQL
     -- Enable UUID extensions for generating UUIDs
     -- uuid-ossp: provides uuid_generate_v4() (legacy, retained for compatibility)
     -- pgcrypto: provides gen_random_uuid() (modern, used by migrations)
@@ -66,8 +73,8 @@ MIGRATIONS_DIR="${SCRIPT_DIR}/../sql/migrations"
 
 if [ -d "$MIGRATIONS_DIR" ]; then
     # Create migration tracking table if it doesn't exist
-    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --host="$POSTGRES_HOST" <<-EOSQL
-        CREATE TABLE IF NOT EXISTS schema_migrations (
+    psql -v ON_ERROR_STOP=1 "${PSQL_ARGS[@]}" <<-EOSQL
+        CREATE TABLE IF NOT EXISTS public.schema_migrations (
             filename TEXT PRIMARY KEY,
             applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
@@ -81,7 +88,7 @@ EOSQL
             migration_name="$(basename "$migration")"
             # Use psql variable binding (-v) to avoid SQL injection via filenames.
             # :'varname' is psql's syntax for a string-quoted variable reference.
-            already_applied=$(echo "SELECT 1 FROM schema_migrations WHERE filename = :'migration_name' LIMIT 1;" | psql -v ON_ERROR_STOP=1 -v migration_name="${migration_name}" --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --host="$POSTGRES_HOST" -tA)
+            already_applied=$(echo "SELECT 1 FROM public.schema_migrations WHERE filename = :'migration_name' LIMIT 1;" | psql -v ON_ERROR_STOP=1 -v migration_name="${migration_name}" "${PSQL_ARGS[@]}" -tA)
             if [ "$already_applied" = "1" ]; then
                 echo "  Skipping ${migration_name} (already applied)"
                 continue
@@ -106,7 +113,7 @@ EOSQL
             # filesystem under our control) so they will never contain single
             # quotes. Use the raw filename directly — the previous bash
             # substitution (${var//\'/\'\'}) was unreliable across bash versions.
-            tracking_sql="INSERT INTO schema_migrations (filename) VALUES ('${migration_name}');"
+            tracking_sql="INSERT INTO public.schema_migrations (filename) VALUES ('${migration_name}');"
             # Find the LAST line where COMMIT; appears (with optional leading whitespace).
             # The start-of-line anchor avoids false matches inside SQL comments
             # (e.g., "-- See COMMIT; behavior") or string literals.
@@ -120,9 +127,19 @@ EOSQL
                 modified_content="${migration_content}
 ${tracking_sql}"
             fi
-            echo "$modified_content" | psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --host="$POSTGRES_HOST"
+            echo "$modified_content" | psql -v ON_ERROR_STOP=1 "${PSQL_ARGS[@]}"
         fi
     done
+
+    # Reassert the tracking table after all migration transaction boundaries.
+    # Some migrations manage their own BEGIN/COMMIT blocks; this keeps the
+    # post-init validation surface deterministic across PostgreSQL runners.
+    psql -v ON_ERROR_STOP=1 "${PSQL_ARGS[@]}" <<-EOSQL
+        CREATE TABLE IF NOT EXISTS public.schema_migrations (
+            filename TEXT PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+EOSQL
 else
     echo "No migrations directory found at ${MIGRATIONS_DIR}, skipping."
 fi

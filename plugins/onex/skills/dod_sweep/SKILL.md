@@ -1,5 +1,5 @@
 ---
-description: "DoD compliance sweep -- retroactive batch audit or targeted pre-close gate"
+description: "DoD compliance sweep -- dispatches to node_dod_sweep_orchestrator for execution"
 version: 1.1.0
 mode: full
 level: advanced
@@ -18,12 +18,14 @@ args:
     description: "Use the last autopilot close-out cycle timestamp as the look-back boundary (overrides --since-days)"
     required: false
   - name: --per-ticket-verify
-    description: "Run dod-verify individually against each discovered ticket (default: false)"
+    description: "Run dod-verify individually against each discovered ticket. Default: true (OMN-9067 — on-by-default; pass --no-per-ticket-verify to disable)"
     required: false
   - name: --dry-run
     description: "Report only, no follow-up tickets"
     required: false
 ---
+
+<!-- routing-enforced: dispatches to node_dod_sweep_orchestrator (stub). functionally-complete requires real node implementation. -->
 
 # DoD Compliance Sweep
 
@@ -55,7 +57,9 @@ Flow:
    - Locate ticket contract at `$ONEX_CC_REPO_PATH/contracts/{ticket_id}.yaml`
    - If contract exists with `dod_evidence[]`, run evidence checks via the shared
      runner at `plugins/onex/skills/_lib/dod-evidence-runner/dod_evidence_runner.py`
-   - Write evidence receipt to `.evidence/{ticket_id}/dod_report.json`
+   - Collect the DoD verification result for the ticket. Durable per-ticket
+     receipt persistence is tracked by OMN-10408 and must not be claimed until
+     the backing node implements it.
 3. Flag any tickets with incomplete DoD evidence (failed or missing checks)
 4. Aggregate results and report summary
 

@@ -69,7 +69,7 @@ import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any, Protocol, TypeVar, cast
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +146,7 @@ SUPPORTED_EVENT_TYPES = frozenset(
         "friction.observed",  # OMN-5747 - Contract-driven friction classification output
         "utilization.scoring.requested",  # OMN-5505 - Utilization scoring command emitted from Stop hook
         "task.delegated",  # OMN-5610 - Delegation event for omnidash delegation_events table
-        "delegation.request",  # OMN-7040 - Delegation request command for node_delegation_orchestrator
+        "delegate.task",  # OMN-7040/OMN-10050 - Delegation request command for node_delegation_orchestrator
         "plan.review.completed",  # OMN-6128 - Plan review strategy run completed
         "hostile.reviewer.completed",  # OMN-6188 - Multi-model hostile review result
         "hostile.reviewer.failed",  # OMN-6188 - Multi-model hostile review failure
@@ -157,6 +157,7 @@ SUPPORTED_EVENT_TYPES = frozenset(
         "team.task.completed",  # OMN-7022 - Team lifecycle: task completed (TaskUpdate)
         "team.evidence.written",  # OMN-7022 - Team lifecycle: evidence artifact written
         "hook.health.error",  # OMN-7158 - Structured hook error event for health observability
+        "diagnostic.daemon.health",  # OMN-10126 - Portable daemon health diagnostic event
         "llm.cost.completed",  # OMN-7570 - LLM cost telemetry for omnidash llm_cost_aggregates
         "agent.action",  # wire-missing-producers - Per-tool agent action (hook → agent_actions table)
     ]
@@ -213,7 +214,17 @@ def _run_sync_in_thread(func: Callable[[], T]) -> T:  # noqa: UP047 - Python 3.1
 # =============================================================================
 
 
-def _create_emit_client(socket_path: str, timeout: float) -> _SocketEmitClient:
+class _EmitClientProtocol(Protocol):
+    """Minimal emit client contract shared by local and omnimarket clients."""
+
+    _socket_path: str
+
+    def emit_sync(self, event_type: str, payload: dict[str, object]) -> str: ...
+
+    def is_daemon_running_sync(self) -> bool: ...
+
+
+def _create_emit_client(socket_path: str, timeout: float) -> _EmitClientProtocol:
     """Create an emit client, preferring omnimarket's portable client.
 
     Tries to import EmitClient from omnimarket.nodes.node_emit_daemon.client
@@ -226,7 +237,7 @@ def _create_emit_client(socket_path: str, timeout: float) -> _SocketEmitClient:
     try:
         from omnimarket.nodes.node_emit_daemon.client import EmitClient  # noqa: PLC0415
 
-        return EmitClient(socket_path=socket_path, timeout=timeout)  # type: ignore[no-any-return]
+        return EmitClient(socket_path=socket_path, timeout=timeout)
     except ImportError:
         import warnings  # noqa: PLC0415
 
@@ -325,11 +336,11 @@ class _SocketEmitClient:
 # =============================================================================
 
 _client_lock = threading.Lock()
-_emit_client: _SocketEmitClient | None = None
+_emit_client: _EmitClientProtocol | None = None
 _client_initialized = False
 
 
-def _get_client() -> _SocketEmitClient | None:
+def _get_client() -> _EmitClientProtocol | None:
     """Get or create the emit client instance (lazy, thread-safe).
 
     The client object is cached, but each request opens a fresh socket
@@ -479,6 +490,13 @@ def emit_event(
         _task_id = os.getenv("ONEX_TASK_ID")
         if _task_id:
             payload["task_id"] = _task_id
+
+    # Inject session_id from CLAUDE_CODE_SESSION_ID if not already in payload (OMN-10753).
+    # CLAUDE_CODE_SESSION_ID is the canonical native env var from Claude Code.
+    if isinstance(payload, dict) and not payload.get("session_id"):
+        _session_id = os.getenv("CLAUDE_CODE_SESSION_ID")
+        if _session_id:
+            payload["session_id"] = _session_id
 
     client = _get_client()
     if client is None:

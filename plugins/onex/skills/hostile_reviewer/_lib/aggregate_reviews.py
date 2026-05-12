@@ -354,6 +354,7 @@ def run_codex(pr_head_sha: str) -> list[dict[str, str]]:
             timeout=120,
             check=False,
         )
+        _emit_codex_cost()
         stdout = result.stdout.strip()
         json_str = _extract_first_json_object(stdout)
         if json_str is None:
@@ -367,6 +368,21 @@ def run_codex(pr_head_sha: str) -> list[dict[str, str]]:
     except Exception as e:
         print(f"[codex] failed: {e}", file=sys.stderr)
         return []
+
+
+def _emit_codex_cost() -> None:
+    """Emit a cost event file for one codex invocation. Non-fatal on any error."""
+    try:
+        _scripts_dir = Path(__file__).parents[4] / "hooks" / "scripts"
+        if str(_scripts_dir) not in sys.path:
+            sys.path.insert(0, str(_scripts_dir))
+        from codex_cost_wrapper import (
+            emit_codex_invocation_cost,  # type: ignore[import]
+        )
+
+        emit_codex_invocation_cost()
+    except Exception as e:
+        print(f"[codex] cost emission failed (non-fatal): {e}", file=sys.stderr)
 
 
 # =============================================================================
@@ -680,17 +696,15 @@ def emit_result(
 # =============================================================================
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Multi-model hostile reviewer aggregator"
+    # OMN-10111: hostile_reviewer disabled pending eval framework validation.
+    # Re-enable when OMN-10111 closes (eval precision/recall thresholds met).
+    print(
+        json.dumps(
+            {
+                "status": "disabled",
+                "reason": "hostile_reviewer disabled pending eval framework validation per OMN-10111",
+                "ticket": "OMN-10111",
+            }
+        )
     )
-    parser.add_argument("--pr", required=True, help="PR number")
-    parser.add_argument("--repo", required=True, help="GitHub repo (org/name)")
-    args = parser.parse_args()
-    result = run_all_models(args.pr, args.repo)
-    emit_result(result, args.pr, args.repo)  # emit_fn defaults to hooks lib
-    print(result.to_json())  # Only JSON to stdout; model output went to stderr
-    # Exit 0 always — degraded state is represented in JSON `success` field.
-    # Callers inspect the payload; a non-zero exit here would mask partial results.
-    sys.exit(0)
+    sys.exit(1)

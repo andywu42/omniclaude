@@ -41,7 +41,7 @@ skip_to = None
 if "--skip-to" in args:
     idx = args.index("--skip-to")
     if idx + 1 >= len(args) or args[idx + 1].startswith("--"):
-        print("Error: --skip-to requires a phase argument (pre_flight|generate_contract|implement|enrich_contract|local_review|dod_verify|test_coverage_gate|create_pr|test_iterate|ci_watch|pr_review_loop|review_gate|integration_verification_gate|auto_merge)")  # ci_watch is now fast/non-blocking
+        print("Error: --skip-to requires a phase argument (pre_flight|generate_contract|implement|enrich_contract|local_review|dod_verify|test_coverage_gate|create_pr|test_iterate|ci_watch|pr_review_loop|review_gate|integration_verification_gate|auto_merge|worktree_cleanup)")  # ci_watch is now fast/non-blocking
         exit(1)
     skip_to = args[idx + 1]
     if skip_to not in PHASE_ORDER:
@@ -195,6 +195,14 @@ phases:
     block_kind: null
     last_error: null
     last_error_at: null
+  worktree_cleanup:
+    started_at: null
+    completed_at: null
+    artifacts: {}       # inspected_roots, removed, retained, blocked_reason
+    blocked_reason: null
+    block_kind: null
+    last_error: null
+    last_error_at: null
 ```
 
 ---
@@ -243,7 +251,7 @@ import os, json, time, uuid, yaml
 from pathlib import Path
 from datetime import datetime, timezone
 
-PHASE_ORDER = ["pre_flight", "generate_contract", "implement", "enrich_contract", "local_review", "dod_verify", "test_coverage_gate", "create_pr", "test_iterate", "ci_watch", "pr_review_loop", "review_gate", "integration_verification_gate", "auto_merge"]
+PHASE_ORDER = ["pre_flight", "generate_contract", "implement", "enrich_contract", "local_review", "dod_verify", "test_coverage_gate", "create_pr", "test_iterate", "ci_watch", "pr_review_loop", "review_gate", "integration_verification_gate", "auto_merge", "worktree_cleanup"]
 
 # NOTE: Helper functions (notify_blocked, etc.) are defined in the
 # "Helper Functions" section below. They are referenced before their
@@ -645,27 +653,10 @@ if not _state_file_existed and skip_to is None and not force_run:
                     _merged_prs = []
 
             if _merged_prs:
-                # PR already merged — nothing to do
+                # PR already merged — still must run worktree cleanup before Done
                 print(f"Auto-detected: Ticket {ticket_id} PR already merged "
-                      f"(merged at {_merged_prs[0].get('mergedAt', '?')}). Skipping ticket.")
-                if not dry_run:
-                    try:
-                        tracker.update_issue(id=ticket_id, state="Done")
-                    except Exception as e:
-                        print(f"[auto-detect] Linear update failed: {e}")
-                else:
-                    print(f"[DRY RUN] Would mark {ticket_id} as Done (PR already merged)")
-                # Clear ledger entry so future pipeline runs are not blocked by a stale lock
-                try:
-                    _ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else {}
-                    _ledger.pop(ticket_id, None)
-                    ledger_path.write_text(json.dumps(_ledger, indent=2))
-                except Exception as _e:
-                    print(f"Warning: Could not clear ledger for {ticket_id}: {_e}")
-                # Remove state file so future runs start clean (not as a stale resume)
-                state_path.unlink(missing_ok=True)
-                release_lock(lock_path)
-                exit(0)
+                      f"(merged at {_merged_prs[0].get('mergedAt', '?')}). Starting worktree_cleanup.")
+                _auto_start_phase = "worktree_cleanup"
             else:
                 # No PR exists at all — also check if the branch exists on remote
                 if _branch:
@@ -1217,6 +1208,14 @@ def build_phase_payload(phase_name, state, result):
             "merged_at": artifacts.get("merged_at", ""),
             "branch_deleted": artifacts.get("branch_deleted", False),
         }
+    elif phase_name == "worktree_cleanup":
+        return {
+            "status": artifacts.get("status", ""),
+            "inspected_roots": list(artifacts.get("inspected_roots", [])),
+            "removed": list(artifacts.get("removed", [])),
+            "retained": list(artifacts.get("retained", [])),
+            "blocked_reason": artifacts.get("blocked_reason", ""),
+        }
 
     print(f"Warning: build_phase_payload called with unrecognized phase '{phase_name}'. Returning empty payload.")
     return {}
@@ -1312,6 +1311,12 @@ def extract_artifacts_from_checkpoint(checkpoint_data):
         artifacts["status"] = payload.get("status", "")
         artifacts["merged_at"] = payload.get("merged_at", "")
         artifacts["branch_deleted"] = payload.get("branch_deleted", False)
+    elif phase == "worktree_cleanup":
+        artifacts["status"] = payload.get("status", "")
+        artifacts["inspected_roots"] = payload.get("inspected_roots", [])
+        artifacts["removed"] = payload.get("removed", [])
+        artifacts["retained"] = payload.get("retained", [])
+        artifacts["blocked_reason"] = payload.get("blocked_reason", "")
 
     return artifacts
 ```
@@ -1713,6 +1718,7 @@ def execute_phase(phase_name, state):
         "review_gate": execute_review_gate,
         "integration_verification_gate": execute_integration_verification_gate,
         "auto_merge": execute_auto_merge,
+        "worktree_cleanup": execute_worktree_cleanup,
         # Kept for backward compat when resuming old-format (v1.0) state files
         "ready_for_merge": execute_ready_for_merge,
     }
@@ -1767,8 +1773,9 @@ def execute_phase(phase_name, state):
    # named in the description. Default to the current worktree's repo if
    # contract is missing.
    target_repo_names = state.get("target_repos") or [state.get("repo")]
+   omni_home = Path(os.environ["OMNI_HOME"])
    repo_roots = [
-       Path(f"/Volumes/PRO-G40/Code/omni_worktrees/{ticket_id}/{name}")  # local-path-ok: worktree path template
+       omni_home / "omni_worktrees" / ticket_id / name
        for name in target_repo_names
        if name
    ]
@@ -2110,8 +2117,8 @@ continues without a contract.
    ```bash
    if [ -z "$ONEX_CC_REPO_PATH" ]; then
      TICKET_ID_SHORT=$(git branch --show-current | grep -oE 'OMN-[0-9]+')
-     WORKTREE_BASE="${ONEX_WORKTREE_ROOT:-/Volumes/PRO-G40/Code/omni_worktrees}"  # local-path-ok: env var default fallback
-     REGISTRY_BASE="${ONEX_REGISTRY_ROOT:-/Volumes/PRO-G40/Code/omni_home}"  # local-path-ok: env var default fallback
+     REGISTRY_BASE="${ONEX_REGISTRY_ROOT:-${OMNI_HOME:?set OMNI_HOME}}"
+     WORKTREE_BASE="${ONEX_WORKTREES_ROOT:-$REGISTRY_BASE/omni_worktrees}"
      for candidate in \
        "$WORKTREE_BASE/$TICKET_ID_SHORT/onex_change_control" \
        "$REGISTRY_BASE/onex_change_control"; do
@@ -2386,7 +2393,7 @@ onex_change_control repo not found), emit a friction event with the error detail
 2. **Dispatch ticket-work to a separate agent (only after Step 0 artifacts exist):**
    ```
    Task(
-     subagent_type="onex:polymorphic-agent",
+     subagent_type="general-purpose",
      description="ticket-pipeline: Phase 1 implement for {ticket_id}: {title}",
      prompt="You are executing ticket-work for {ticket_id}.
        Invoke: Skill(skill=\"onex:ticket_work\", args=\"{ticket_id}\")
@@ -2405,7 +2412,7 @@ onex_change_control repo not found), emit a friction event with the error detail
    Where `{branch_name}` is resolved from `state["phases"]["implement"]["artifacts"]["branch_name"]`
    set in Step 0.
 
-   This spawns a polymorphic agent with its own context window to run the full ticket-work
+   This spawns a general-purpose agent with its own context window to run the full ticket-work
    workflow including human gates (questions, spec, approval). The pipeline waits for the
    agent to complete and reads its result.
 
@@ -2486,8 +2493,8 @@ local_review. Failure is non-fatal -- the pipeline continues with an unenriched 
    ```bash
    if [ -z "$ONEX_CC_REPO_PATH" ]; then
      TICKET_ID_SHORT=$(git branch --show-current | grep -oE 'OMN-[0-9]+')
-     WORKTREE_BASE="${ONEX_WORKTREE_ROOT:-/Volumes/PRO-G40/Code/omni_worktrees}"  # local-path-ok: env var default fallback
-     REGISTRY_BASE="${ONEX_REGISTRY_ROOT:-/Volumes/PRO-G40/Code/omni_home}"  # local-path-ok: env var default fallback
+     REGISTRY_BASE="${ONEX_REGISTRY_ROOT:-${OMNI_HOME:?set OMNI_HOME}}"
+     WORKTREE_BASE="${ONEX_WORKTREES_ROOT:-$REGISTRY_BASE/omni_worktrees}"
      for candidate in \
        "$WORKTREE_BASE/$TICKET_ID_SHORT/onex_change_control" \
        "$REGISTRY_BASE/onex_change_control"; do
@@ -2568,7 +2575,7 @@ local_review. Failure is non-fatal -- the pipeline continues with an unenriched 
 1. **Dispatch local-review to a separate agent:**
    ```
    Task(
-     subagent_type="onex:polymorphic-agent",
+     subagent_type="general-purpose",
      description="ticket-pipeline: Phase 2 local-review for {ticket_id}",
      prompt="You are executing local-review for {ticket_id}.
        Invoke: Skill(skill=\"onex:local_review\", args=\"--max-iterations {max_review_iterations} --required-clean-runs 1 --checkpoint {ticket_id}:{run_id}\")
@@ -3279,7 +3286,7 @@ EOF
 1. **Dispatch ci-watch to a separate agent:**
    ```
    Task(
-     subagent_type="onex:polymorphic-agent",
+     subagent_type="general-purpose",
      description="ticket-pipeline: Phase 4 ci_watch for {ticket_id} on PR #{pr_number}",
      prompt="Invoke: Skill(skill=\"onex:ci_watch\",
        args=\"--pr {pr_number} --ticket-id {ticket_id} --timeout-minutes {ci_watch_timeout_minutes} --max-fix-cycles {max_ci_fix_cycles}\")
@@ -3316,7 +3323,7 @@ EOF
 1. **Dispatch pr-watch to a separate agent:**
    ```
    Task(
-     subagent_type="onex:polymorphic-agent",
+     subagent_type="general-purpose",
      description="ticket-pipeline: Phase 5 pr_review_loop for {ticket_id} on PR #{pr_number}",
      prompt="Invoke: Skill(skill=\"onex:pr_watch\",
        args=\"--pr {pr_number} --ticket-id {ticket_id} --timeout-hours {pr_review_timeout_hours} --max-review-cycles {max_pr_review_cycles}\")
@@ -3344,6 +3351,8 @@ EOF
 ---
 
 ### Phase 5.5: REVIEW_GATE (OMN-6535)
+
+> **[OMN-10111] DISABLED:** hostile_reviewer is currently disabled pending eval framework validation. Skip this phase entirely. Do NOT invoke. Advance directly to integration_verification_gate. Re-enable when OMN-10111 closes.
 
 **Trigger**: pr_review_loop complete (all human review comments addressed)
 **Skip if**: `--docs-only` flag is set (documentation-only changes don't need adversarial review)
@@ -3405,10 +3414,10 @@ implementation including NEEDS_GATE predicate, one-shot merge check, and excepti
 - `phases.auto_merge.started_at`
 - `phases.auto_merge.completed_at`
 - `phases.auto_merge.artifacts` (status: `merged_via_auto` | `auto_merge_pending` | `merged` | `held`, merged_at)
-- `$ONEX_STATE_DIR/pipelines/ledger.json` (entry cleared on merged)
+- `$ONEX_STATE_DIR/pipelines/ledger.json` (entry remains until worktree_cleanup completes)
 
 **Exit conditions:**
-- **Completed (merged_via_auto):** Already merged; Linear set to Done, ledger cleared
+- **Completed (merged_via_auto):** Already merged; pipeline advances to worktree_cleanup
 - **Completed (auto_merge_pending):** GitHub auto-merge armed; pr-watch observes completion
 - **Failed:** merge errors
 
@@ -3425,7 +3434,7 @@ implementation including NEEDS_GATE predicate, one-shot merge check, and excepti
 1. **Dispatch pre-flight checks to a separate agent:**
    ```
    Task(
-     subagent_type="onex:polymorphic-agent",
+     subagent_type="general-purpose",
      description="ticket-pipeline: Phase 0 pre_flight for {ticket_id}",
      prompt="You are executing pre-flight checks for {ticket_id}.
        Run pre-commit hooks and mypy on a clean checkout.
@@ -3644,7 +3653,7 @@ and auto-merge asynchronously.
    Dispatch ci-watch as a **non-blocking background agent** to fix CI failures:
    ```
    Task(
-     subagent_type="onex:polymorphic-agent",
+     subagent_type="general-purpose",
      run_in_background=True,
      description="ci-watch: fix CI failures for {ticket_id} PR #{pr_number}",
      prompt="CI is failing for PR #{pr_number} in {repo} ({ticket_id}).
@@ -3680,7 +3689,7 @@ and auto-merge asynchronously.
 1. **Dispatch pr-watch to a separate agent:**
    ```
    Task(
-     subagent_type="onex:polymorphic-agent",
+     subagent_type="general-purpose",
      description="ticket-pipeline: Phase 5 pr_review_loop for {ticket_id} on PR #{pr_number}",
      prompt="You are executing pr-watch for {ticket_id}.
        Invoke: Skill(skill=\"onex:pr_watch\",
@@ -3875,16 +3884,12 @@ Ledger entry is NOT cleared — a new run resumes at Phase 5.75.
                pr_url=pr_url,
            )
            try:
-               tracker.update_issue(id=ticket_id, state="Done")
+               tracker.create_comment(
+                   issueId=ticket_id,
+                   body="PR merged; ticket-pipeline is running mandatory worktree_cleanup before Done."
+               )
            except Exception as _le:
-               print(f"Warning: Failed to update Linear to Done: {_le}")
-           # Clear ledger
-           try:
-               _ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else {}
-               _ledger.pop(ticket_id, None)
-               ledger_path.write_text(json.dumps(_ledger, indent=2))
-           except Exception as _le2:
-               print(f"Warning: Failed to clear ledger: {_le2}")
+               print(f"Warning: Failed to post worktree cleanup pre-closeout comment: {_le}")
            result = {
                "status": "completed",
                "blocking_issues": 0,
@@ -3926,7 +3931,7 @@ Ledger entry is NOT cleared — a new run resumes at Phase 5.75.
 
    # Dispatch auto-merge to a separate agent — proceeds automatically, no gate
    Task(
-     subagent_type="onex:polymorphic-agent",
+     subagent_type="general-purpose",
      description="ticket-pipeline: Phase 6 auto_merge (NEEDS_GATE) for {ticket_id} on PR #{pr_number}",
      prompt="You are executing auto-merge (NEEDS_GATE path) for {ticket_id}.
        Invoke: Skill(skill=\"onex:auto_merge\",
@@ -3940,37 +3945,117 @@ Ledger entry is NOT cleared — a new run resumes at Phase 5.75.
    )
 
    # Handle result:
-   # merged → clear ledger, post Slack, update Linear to Done, emit status
+   # merged → advance to worktree_cleanup; that phase clears ledger and updates Linear to Done
    # failed → post Slack notification, clear ledger with error note, stop pipeline
    ```
 
 **Handle completed (merged) result:**
    ```python
-   # Clear ticket-run ledger entry
    try:
-       ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else {}
-       ledger.pop(ticket_id, None)
-       ledger_path.write_text(json.dumps(ledger, indent=2))
+       tracker.create_comment(
+           issueId=ticket_id,
+           body="PR merged; ticket-pipeline is running mandatory worktree_cleanup before Done."
+       )
    except Exception as e:
-       print(f"Warning: Failed to clear ledger entry for {ticket_id}: {e}")
-
-   # Update Linear to Done
-   try:
-       tracker.update_issue(id=ticket_id, state="Done")
-   except Exception as e:
-       print(f"Warning: Failed to update Linear issue {ticket_id}: {e}")
+       print(f"Warning: Failed to post worktree cleanup pre-closeout comment for {ticket_id}: {e}")
    ```
 
 **Mutations:**
 - `phases.auto_merge.started_at`
 - `phases.auto_merge.completed_at`
 - `phases.auto_merge.artifacts` (status: `merged_via_auto` | `auto_merge_pending` | `merged`, merged_at, branch_deleted)
-- `$ONEX_STATE_DIR/pipelines/ledger.json` (entry cleared on merged)
+- `$ONEX_STATE_DIR/pipelines/ledger.json` (entry remains until worktree_cleanup completes)
 
 **Exit conditions:**
-- **Completed (merged_via_auto):** Already merged; Linear set to Done, ledger cleared
+- **Completed (merged_via_auto):** Already merged; pipeline advances to worktree_cleanup
 - **Completed (auto_merge_pending):** GitHub auto-merge armed; pr-watch observes completion
 - **Failed:** merge errors
+
+---
+
+### Phase 7: WORKTREE_CLEANUP
+
+**Invariants:**
+- PR is merged or known to be pending auto-merge observation.
+- Ticket must not be marked Done until this phase completes.
+- New work is allowed only under `ONEX_WORKTREES_ROOT`; any configured `LEGACY_WORKTREES_ROOT` is quarantine only.
+
+**Actions:**
+
+1. **Resolve candidate worktree roots.**
+
+   ```python
+   allowed_root = Path(os.environ["ONEX_WORKTREES_ROOT"])
+   legacy_value = os.environ.get("LEGACY_WORKTREES_ROOT")
+   candidate_roots = [allowed_root]
+   if legacy_value:
+       candidate_roots.append(Path(legacy_value))
+   ```
+
+2. **Find matching ticket/repo worktrees.**
+
+   Check at minimum:
+
+   - `$ONEX_WORKTREES_ROOT/{ticket_id}/`
+   - `$LEGACY_WORKTREES_ROOT/{ticket_id}/` when `LEGACY_WORKTREES_ROOT` is set
+   - any legacy path whose basename or branch contains `{ticket_id}`
+
+3. **For each candidate worktree, verify safe removal.**
+
+   Required checks:
+
+   ```bash
+   git -C "$worktree" status --short
+   git -C "$worktree" rev-parse --abbrev-ref --symbolic-full-name '@{u}'
+   git -C "$worktree" log --oneline '@{u}..HEAD'
+   ```
+
+   A worktree is safe to remove only when:
+
+   - no uncommitted or staged changes;
+   - upstream exists and is resolvable;
+   - no unpushed commits;
+   - PR is merged or the branch is otherwise explicitly closed.
+
+4. **Remove only safe worktrees.**
+
+   Run removal from the canonical repo, then prune:
+
+   ```bash
+   canonical_repo="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)"
+   canonical_repo="${canonical_repo%/.git}"
+   git -C "$canonical_repo" worktree remove "$worktree"
+   git -C "$canonical_repo" worktree prune
+   ```
+
+5. **Block unsafe cleanup.**
+
+   If any matching worktree is dirty, detached, missing upstream, or has unpushed commits:
+
+   - do not remove it;
+   - do not mark the ticket Done;
+   - add a Linear comment with path, branch, dirty count, unpushed commits, and required owner decision;
+   - return `status: blocked` with `block_kind: blocked_policy`.
+
+6. **Complete closeout only after cleanup.**
+
+   After all matching worktrees are removed or explicitly retained with a Linear comment:
+
+   - clear `$ONEX_STATE_DIR/pipelines/ledger.json` for the ticket;
+   - update Linear ticket to Done;
+   - record artifacts: `inspected_roots`, `removed`, `retained`, `status`.
+
+**Mutations:**
+- `phases.worktree_cleanup.started_at`
+- `phases.worktree_cleanup.completed_at`
+- `phases.worktree_cleanup.artifacts`
+- `$ONEX_STATE_DIR/pipelines/ledger.json` (entry cleared only on cleanup success)
+- Linear ticket state set to Done only on cleanup success
+
+**Exit conditions:**
+- **Completed:** all matching worktrees removed or explicitly retained with a Linear comment
+- **Blocked:** any matching worktree has unpreserved dirty/unpushed work
+- **Failed:** git or tracker errors prevent cleanup classification
 
 ---
 

@@ -20,9 +20,23 @@ if [[ "${OMNICLAUDE_HOOKS_DISABLED:-0}" == "1" ]]; then
     cat  # drain stdin
     exit 0
 fi
-if [[ "${OMNICLAUDE_HOOK_CI_REMINDER:-1}" == "0" ]]; then
-    cat  # drain stdin
-    exit 0
+source "$(dirname "${BASH_SOURCE[0]}")/scripts/hook-gate.sh" 2>/dev/null || true
+onex_hook_gate CI_REMINDER || exit 0
+
+# -----------------------------------------------------------------------
+# Repo-guard: only fire in OmniNode repos. External users of the plugin
+# working in unrelated projects should not see CI reminders on every
+# git commit. See plugins/onex/hooks/lib/repo_guard.sh.
+# -----------------------------------------------------------------------
+_REPO_GUARD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/repo_guard.sh
+. "${_REPO_GUARD_DIR}/lib/repo_guard.sh" 2>/dev/null || true
+unset _REPO_GUARD_DIR
+if declare -F is_omninode_repo >/dev/null 2>&1; then
+    if ! is_omninode_repo; then
+        cat  # drain stdin, pass through silently
+        exit 0
+    fi
 fi
 
 # -----------------------------------------------------------------------
@@ -60,6 +74,7 @@ REMINDER="[CI Reminder] A commit was just created. Before pushing, verify that v
 MODIFIED=$(printf '%s' "$TOOL_INFO" | jq \
     --arg reminder "$REMINDER" \
     '.hookSpecificOutput = (.hookSpecificOutput // {}) |
+     .hookSpecificOutput.hookEventName = "PostToolUse" |
      .hookSpecificOutput.additionalContext = (
        ((.hookSpecificOutput.additionalContext // "") + "\n\n" + $reminder)
        | ltrimstr("\n\n")

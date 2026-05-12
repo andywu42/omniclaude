@@ -41,6 +41,9 @@ args:
   - name: gate
     description: "Gate mode: run 3 parallel review agents (scope, correctness, conventions) and output a structured pass/fail/block verdict suitable for merge gating. Mutually exclusive with --file."
     required: false
+  - name: gate-only
+    description: "Review-only gate mode (no fix-apply). Reads the PR diff, calls the review aggregator inline over HTTP, posts a verdict comment, and updates the gate marker. Does NOT dispatch any sub-agent for fix-application. Safe to invoke from a sub-agent / headless context where Agent()/Task() is unavailable. Mutually exclusive with --file."
+    required: false
   - name: strict
     description: "In --gate mode: block on MINOR+ findings (default blocks on MAJOR+)"
     required: false
@@ -48,7 +51,7 @@ args:
     description: "Static-analysis-only mode. Runs 7 code quality checks (dead code, missing error handling, stubs shipped, missing Kafka wiring, schema mismatches, hardcoded values, missing tests) without adversarial multi-model review. Use --repos and --categories to scope the scan."
     required: false
   - name: repos
-    description: "Comma-separated repo names to scan in --static mode (default: all Python repos in the OmniNode-ai org)"
+    description: "Comma-separated repo names to scan in --static mode (default: all Python repos discoverable via onex list-repos)"
     required: false
   - name: categories
     description: "Comma-separated finding categories for --static mode: dead-code,missing-error-handling,stubs-shipped,missing-kafka-wiring,schema-mismatches,hardcoded-values,missing-tests (default: all)"
@@ -66,26 +69,47 @@ args:
 
 # hostile-reviewer
 
+> **[OMN-10111] DISABLED:** hostile_reviewer is currently disabled pending eval framework validation. Do NOT invoke this skill in any mode (--gate, --static, --file, --pr). Re-enable when OMN-10111 closes (eval precision/recall thresholds met, silent-stub file-mode replaced).
+
 **Announce at start:** "I'm using the hostile-reviewer skill."
 
 ## Architecture
 
 ```
 SKILL.md   -> thin shell (this file)
-node       -> omniintelligence/src/omniintelligence/review_pairing/ (multi-model review)
-entry      -> omniintelligence.review_pairing.cli_review (CLI)
+node       -> onex run node_hostile_reviewer (dispatched via ONEX runtime)
+entry      -> onex run node_hostile_reviewer --pr <N> --repo <owner/repo>
 ```
 
-Node invocation (working directory must be the `omniintelligence` repo root):
+Node invocation (standalone — no local clone required):
 
 ```bash
-uv run python -m omniintelligence.review_pairing.cli_review \  # local-path-ok: omniintelligence direct CLI invocation until OMN-8770 onex run migration
+onex run node_hostile_reviewer \
   --pr <N> --repo <owner/repo> --model codex --model deepseek-r1 2>/dev/null
 ```
 
 ## Dispatch Surface
 
 **Target**: Agent Teams + Local LLM
+
+## Reviewer Availability
+
+At invocation, the skill announces which reviewers are available before running:
+
+```
+Available reviewers: codex (local), deepseek-r1 (local), qwen3-coder (runtime)
+Unavailable: gemini (omnigemini plugin not installed)
+```
+
+Availability is determined by:
+- `codex`: `codex` binary present in PATH
+- `deepseek-r1`, `qwen3-coder`, `qwen3-14b`: reachable via `onex run node_hostile_reviewer --list-models`
+- `gemini`: omnigemini sibling plugin installed and responding
+
+**Missing sibling plugin**: If a requested model requires a sibling plugin (e.g., `gemini` requires
+`omnigemini`) and that plugin is unavailable, the model runner returns an empty findings list and
+logs a warning. The aggregate result reflects only the models that succeeded. Callers should
+verify `models_run`, `models_clean`, and `models_failed` in the output and escalate if critical models are absent.
 
 ## Description
 
@@ -142,6 +166,34 @@ former `review_gate` skill.
 /hostile-reviewer --pr 433 --repo OmniNode-ai/omniclaude --gate
 /hostile-reviewer --pr 433 --repo OmniNode-ai/omniclaude --gate --strict
 ```
+
+### Gate-Only Mode (`--pr <N> --repo <owner/repo> --gate-only`) [OMN-9268]
+
+Review-only gate mode for sub-agent / headless contexts where `Agent()` / `Task()`
+dispatch is unavailable. Runs the review path fully inline:
+
+1. Fetches the PR diff via `gh pr diff`
+2. Calls `_lib/aggregate_reviews.py` directly — HTTP to local model endpoints
+   (`LLM_CODER_URL`, `LLM_DEEPSEEK_R1_URL`) plus Codex / Gemini CLIs if present
+3. Posts a verdict comment on the PR
+4. Updates the gate sentinel at `$ONEX_STATE_DIR/hostile-review-pass/<pr>.json`
+5. Exits with the verdict code
+
+**No sub-agent / fix-apply dispatch.** If findings require code changes, the
+sub-agent must escalate back to a lead session (which can invoke the full
+`--gate` pipeline).
+
+```bash
+/hostile-reviewer --pr 433 --repo OmniNode-ai/omniclaude --gate-only
+# or direct CLI fallback (same effect, no Skill tool required):
+uv run python plugins/onex/skills/hostile_reviewer/_lib/aggregate_reviews.py \
+  --pr 433 --repo OmniNode-ai/omniclaude
+```
+
+Trigger: `post_tool_use_auto_hostile_review.sh` detects the sub-agent session
+marker at `$ONEX_STATE_DIR/hooks/subagent-sessions/<session_id>.marker`
+(OMN-9140) and steers the post-PR-create advisory at `--gate-only` instead of
+the Agent()-dispatch advisory.
 
 **Gate verdict output** (`extra_status`):
 - `passed`: no blocking findings across all agents
@@ -243,7 +295,7 @@ while consecutive_clean < 2 and pass_number < max_passes:
             "MINOR": count(MINOR),
             "NIT": count(NIT)
         },
-        "models_used": result.models_succeeded,
+        "models_used": result.models_clean,
         "action": "clean" if not above_nit else "fix_and_rerun"
     })
 
@@ -255,7 +307,7 @@ while consecutive_clean < 2 and pass_number < max_passes:
 
     # 5. If not converged, apply fixes and loop
     if consecutive_clean < 2 and above_nit:
-        apply_fixes(above_nit)  # dispatch to polymorphic-agent for code changes
+        apply_fixes(above_nit)  # dispatch to general-purpose for code changes
 
     # If --passes N was specified and we hit it, stop regardless
     if args.passes and pass_number >= args.passes:
@@ -275,20 +327,20 @@ Each pass within the loop executes:
 
 **PR mode (default models):**
 ```bash
-uv run python -m omniintelligence.review_pairing.cli_review \  # local-path-ok: omniintelligence direct CLI invocation until OMN-8770 onex run migration
+onex run node_hostile_reviewer \
   --pr <N> --repo <owner/repo> --model codex --model deepseek-r1 2>/dev/null
 ```
 
 **File mode (default models):**
 ```bash
-uv run python -m omniintelligence.review_pairing.cli_review \  # local-path-ok: omniintelligence direct CLI invocation until OMN-8770 onex run migration
+onex run node_hostile_reviewer \
   --file <path> --model codex --model deepseek-r1 2>/dev/null
 ```
 
 When `--models` is provided, expand into repeated `--model` args dynamically:
 ```bash
 # Example: --models deepseek-r1,qwen3-14b,codex
-uv run python -m omniintelligence.review_pairing.cli_review \  # local-path-ok: omniintelligence direct CLI invocation until OMN-8770 onex run migration
+onex run node_hostile_reviewer \
   --pr <N> --repo <owner/repo> --model deepseek-r1 --model qwen3-14b --model codex 2>/dev/null
 ```
 
@@ -302,7 +354,7 @@ uv run python -m omniintelligence.review_pairing.cli_review \  # local-path-ok: 
 When a pass produces findings above NIT:
 
 1. Report findings to the caller.
-2. Dispatch a polymorphic-agent to apply fixes for all CRITICAL, MAJOR, and MINOR findings.
+2. Dispatch a general-purpose to apply fixes for all CRITICAL, MAJOR, and MINOR findings.
 3. Stage the fixes (but do not commit -- the caller controls commits).
 4. Re-run the review on the updated code.
 
@@ -325,10 +377,9 @@ This persona enforces:
 - Specific "what to change and why" per finding (three sentences max)
 - Skeptical analytical tone: nothing is assumed correct unless proven
 
-Persona file: `omniintelligence/review_pairing/personas/analytical-strict.md`
+Persona file: bundled with the `node_hostile_reviewer` node at `review_pairing/personas/analytical-strict.md`
 
-To override: pass `--persona <name>` where `<name>` matches a file in
-`omniintelligence/review_pairing/personas/`. To use no persona: pass
+To override: pass `--persona <name>` where `<name>` matches a bundled persona name. To use no persona: pass
 `--system-prompt /dev/null` (bypasses persona loading).
 
 ## Model Selection
@@ -535,7 +586,7 @@ Write result to `$ONEX_STATE_DIR/skill-results/{context_id}/hostile-reviewer.jso
   ],
   "models_requested": ["gemini", "codex", "qwen3-coder", "deepseek-r1"],
   "models_run": ["gemini", "codex", "qwen3-coder", "deepseek-r1"],
-  "models_succeeded": ["gemini", "codex", "qwen3-coder", "deepseek-r1"],
+  "models_clean": ["gemini", "codex", "qwen3-coder", "deepseek-r1"],
   "models_failed": [],
   "per_model_severity_counts": {
     "codex": {"CRITICAL": 0, "MAJOR": 0, "MINOR": 0, "NIT": 0},

@@ -34,6 +34,7 @@ unset _SELF SCRIPT_DIR
 HOOKS_DIR="${PLUGIN_ROOT}/hooks"
 HOOKS_LIB="${HOOKS_DIR}/lib"
 source "${HOOKS_DIR}/scripts/common.sh"
+onex_hook_gate PIPELINE_GATE || exit 0
 source "$(dirname "${BASH_SOURCE[0]}")/onex-paths.sh" || { echo "ONEX_STATE_DIR not set" >&2; exit 1; }
 LOG_FILE="${ONEX_HOOK_LOG}"
 
@@ -213,7 +214,7 @@ now = time.time()
 max_age_seconds = 1800  # 30 minutes
 
 # Session correlation
-session_id = os.environ.get('CLAUDE_SESSION_ID', '')
+session_id = os.environ.get('CLAUDE_CODE_SESSION_ID', '')
 
 for state_file in state_dir.glob('*/state.yaml'):
     try:
@@ -264,7 +265,7 @@ fi
 
 # --- Check for /authorize override ---
 AUTH_DIR="/tmp/omniclaude-auth"
-SESSION_ID="${CLAUDE_SESSION_ID:-unknown}"
+SESSION_ID="${CLAUDE_CODE_SESSION_ID:-unknown}"
 if [[ -f "${AUTH_DIR}/${SESSION_ID}.json" ]]; then
     AUTH_VALID=$($PYTHON_CMD -c "
 import json, sys, time

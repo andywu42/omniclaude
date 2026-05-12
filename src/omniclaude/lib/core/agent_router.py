@@ -34,6 +34,7 @@ import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -45,6 +46,20 @@ import yaml
 from omniclaude.lib.errors import EnumCoreErrorCode, OnexError
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_session_id_canonical() -> str:
+    try:
+        from session_id import (
+            resolve_session_id,  # type: ignore[import-not-found]  # noqa: PLC0415
+        )
+    except ModuleNotFoundError as exc:
+        if exc.name != "session_id":
+            raise
+        from plugins.onex.hooks.lib.session_id import (
+            resolve_session_id,  # noqa: PLC0415
+        )
+    return resolve_session_id()
 
 
 def _get_default_registry_path() -> str:
@@ -239,7 +254,7 @@ class AgentRouter:
             ) from e
 
     @staticmethod
-    def _resolve_emit_fn() -> Any:
+    def _resolve_emit_fn() -> Callable[..., Any] | None:
         """Resolve the emit_event function from emit_client_wrapper.
 
         Returns the emit_event callable or None if unavailable.
@@ -297,7 +312,7 @@ class AgentRouter:
             payload: dict[str, object] = {
                 "correlation_id": str(uuid4()),
                 "request_id": str(uuid4()),
-                "session_id": session_id or os.getenv("CLAUDE_SESSION_ID", "unknown"),
+                "session_id": session_id or _resolve_session_id_canonical(),
                 "selected_agent": selected_agent,
                 "llm_agent": selected_agent,
                 "fuzzy_agent": selected_agent,
@@ -330,7 +345,10 @@ class AgentRouter:
             if emitted:
                 logger.debug(
                     "Routing decision event emitted",
-                    extra={"selected_agent": selected_agent, "topic": "llm.routing.decision"},
+                    extra={
+                        "selected_agent": selected_agent,
+                        "topic": "llm.routing.decision",
+                    },
                 )
             else:
                 logger.debug(
@@ -381,6 +399,10 @@ class AgentRouter:
             with self._stats_lock:
                 self.routing_stats["total_routes"] += 1
             context = context or {}
+            raw_sid = context.get("session_id")
+            context_session_id: str | None = (
+                str(raw_sid) if raw_sid is not None else None
+            )
 
             logger.debug(
                 f"Routing request: {user_request[:100]}...",
@@ -450,7 +472,7 @@ class AgentRouter:
                         timing=timing,
                         routing_policy="explicit_request",
                         fallback=False,
-                        session_id=context.get("session_id") if isinstance(context, dict) else None,
+                        session_id=context_session_id,
                     )
 
                     return result
@@ -561,7 +583,7 @@ class AgentRouter:
                 timing=timing,
                 routing_policy="trigger_match",
                 fallback=len(recommendations) == 0,
-                session_id=context.get("session_id") if isinstance(context, dict) else None,
+                session_id=context_session_id,
             )
 
             return recommendations
@@ -707,13 +729,13 @@ class AgentRouter:
         - "use agent-X" - Specific agent request
         - "@agent-X" - Specific agent request
         - "agent-X" at start of text - Specific agent request
-        - "use an agent", "spawn an agent", etc. - Generic request -> polymorphic-agent
+        - Generic requests like "use an agent" return None (no fallback)
 
         Args:
             text: User's input text
 
         Returns:
-            Agent name if found and valid, None otherwise.
+            Agent name if found and valid, None otherwise (no fallback).
 
         Raises:
             None: Exceptions are caught and logged; returns None on error.
@@ -725,7 +747,7 @@ class AgentRouter:
             >>> router._extract_explicit_agent("@agent-debug analyze error")
             'agent-debug'
             >>> router._extract_explicit_agent("use an agent to help")
-            'polymorphic-agent'
+            None
             >>> router._extract_explicit_agent("just a normal query")
             None
         """
@@ -752,38 +774,7 @@ class AgentRouter:
                         )
                         return agent_name
 
-            # Patterns for generic agent requests (no specific agent name)
-            # These should default to polymorphic-agent
-            # Word boundaries (\b) prevent false positives like "misuse an agent"
-            generic_patterns = [
-                r"\buse\s+an?\s+agent\b",  # "use an agent" or "use a agent"
-                r"\bspawn\s+an?\s+agent\b",  # "spawn an agent" or "spawn a agent"
-                r"\bspawn\s+an?\s+poly\b",  # "spawn a poly" or "spawn an poly"
-                r"\bdispatch\s+to\s+an?\s+agent\b",  # "dispatch to an agent"
-                r"\bcall\s+an?\s+agent\b",  # "call an agent" or "call a agent"
-                r"\binvoke\s+an?\s+agent\b",  # "invoke an agent" or "invoke a agent"
-            ]
-
-            # Check generic patterns
-            for pattern in generic_patterns:
-                match = re.search(pattern, text_lower)
-                if match:
-                    # Default to polymorphic-agent
-                    default_agent = "polymorphic-agent"
-                    # Verify polymorphic-agent exists in registry
-                    if default_agent in self.registry["agents"]:
-                        logger.debug(
-                            f"Generic agent request matched, using default: {default_agent}",
-                            extra={"pattern": pattern, "text_sample": text[:50]},
-                        )
-                        return default_agent
-                    else:
-                        logger.warning(
-                            f"Generic agent request matched but "
-                            f"{default_agent} not found in registry",
-                            extra={"pattern": pattern},
-                        )
-
+            # No match — fail-fast, no fallback
             return None
 
         except Exception as e:

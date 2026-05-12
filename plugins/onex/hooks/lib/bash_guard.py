@@ -71,6 +71,7 @@ import datetime
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import urllib.request
@@ -234,12 +235,38 @@ HARD_BLOCK_PATTERNS: list[re.Pattern[str]] = [
         r"printf\b\s+['\"]?\\x[0-9a-f]+[^|]*\|\s*(?:ba)?sh\b",
         re.IGNORECASE | re.MULTILINE,
     ),
-    # gh pr merge --auto silently picks the wrong merge method (OMN-8838).
-    # Agents must use GraphQL enablePullRequestAutoMerge with mergeMethod: SQUASH.
-    # Note: \b does not match before '--' (both '-' and space are \W), so we
-    # use '(?:^|\s)--auto\b' to anchor the flag at a word/space boundary.
+    # gh pr merge --auto COMBINED WITH --merge or --rebase (OMN-9548).
+    #
+    # Empirical evidence (2026-04-23, omnibase_core#884): GitHub's GraphQL API
+    # has a hardcoded default of MERGE for enablePullRequestAutoMerge — it does
+    # NOT inherit from the queue ruleset or repo allow-settings. The only way
+    # to arm SQUASH on a queue-SQUASH repo is to pass SQUASH explicitly.
+    #
+    # Since OMN-9547 set `allow_squash_merge: true` as the ONLY permitted
+    # method on all 12 OmniNode-ai repos, MERGE and REBASE are the mismatch
+    # cases that silently drop the queue entry. SQUASH is now the correct,
+    # required method and must be allowed.
+    #
+    # Supersedes OMN-8838 (which blocked --squash along with --merge/--rebase).
     re.compile(
-        r"\bgh\s+pr\s+merge\b.*(?:^|\s)--auto\b",
+        r"\bgh\s+pr\s+merge\b(?=.*(?:^|\s)--auto\b)(?=.*(?:^|\s)--(?:merge|rebase)\b)",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    # GraphQL enablePullRequestAutoMerge with mergeMethod: MERGE or REBASE
+    # (OMN-9548). Blocks the actual mismatch cases on OmniNode-ai queue-SQUASH
+    # repos. `mergeMethod: SQUASH` is the correct form and must be allowed —
+    # it is the ONLY method that arms auto-merge correctly now that repo
+    # allow-settings restrict to squash (OMN-9547).
+    #
+    # Supersedes OMN-9433 (which blocked any mergeMethod argument on the
+    # mistaken premise that omitting it let the queue pick — empirically false;
+    # the API defaults to MERGE).
+    #
+    # Pattern anchors mergeMethod inside the enablePullRequestAutoMerge(...)
+    # input block so CLI flags like -F mergeMethod=MERGE that are not part of
+    # the mutation input don't trigger a false-positive block.
+    re.compile(
+        r"enablePullRequestAutoMerge\s*\([\s\S]*?\bmergeMethod\s*:\s*(?:MERGE|REBASE)\b",
         re.IGNORECASE | re.MULTILINE,
     ),
     # Branch protection: block re-enabling required_pull_request_reviews.
@@ -324,8 +351,12 @@ SOFT_ALERT_PATTERNS: list[re.Pattern[str]] = [
 
 # Module-level compiled pattern for raw git worktree add detection.
 # Used in both CONTEXT_ADVISORY_PATTERNS and the advisory body generation.
+# Matches: git [-C <path>] [--git-flag ...] worktree add
+# Only allows git flags (tokens starting with -) and -C <path> pairs between
+# 'git' and 'worktree', so commit messages like
+# "git commit -m 'feat: duplicate git worktree add'" cannot match.
 _WORKTREE_ADD_RE: re.Pattern[str] = re.compile(
-    r"\bgit\b[^;|&\n]*\bworktree\s+add\b",
+    r"\bgit\b(?:\s+-C\s+\S+|\s+--\S+|\s+-\w+)*\s+worktree\s+add\b",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -340,12 +371,44 @@ _QUOTED_STRING_RE: re.Pattern[str] = re.compile(
 def _is_real_worktree_add(command: str) -> bool:
     """Return True only if *command* contains ``git worktree add`` as an actual command.
 
-    Strips quoted strings first so that occurrences inside commit messages
-    (``git commit -m "fix worktree add"``) or grep patterns
-    (``grep "git worktree add" file``) do not trigger false positives.
+    Splits on shell command separators (&&, ||, ;, |, newlines) and checks each
+    segment independently after stripping quoted strings. Within each segment,
+    locates the FIRST ``git`` token (the command invocation) and checks whether
+    its subcommand is ``worktree add``.  Skipping only the first ``git`` prevents
+    matching a second ``git`` that appears in an unquoted commit message body.
     """
-    stripped = _QUOTED_STRING_RE.sub("", command)
-    return bool(_WORKTREE_ADD_RE.search(stripped))
+    segments = re.split(r"&&|\|\||[;|\n]", command)
+    for segment in segments:
+        stripped = _QUOTED_STRING_RE.sub("", segment).strip()
+        if "worktree" not in stripped.lower():
+            continue
+        tokens = stripped.split()
+        # Find the index of the first 'git' token in this segment
+        try:
+            git_idx = next(
+                i for i, t in enumerate(tokens) if t.lower() in ("git", "/usr/bin/git")
+            )
+        except StopIteration:
+            continue
+        # Walk tokens after 'git', skipping flags, to find the subcommand
+        i = git_idx + 1
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok == "-C" and i + 1 < len(tokens):  # noqa: S105
+                i += 2  # -C <path>: skip both
+            elif tok.startswith("-"):
+                i += 1
+            else:
+                break  # first non-flag token = subcommand
+        if i >= len(tokens) or tokens[i].lower() != "worktree":
+            continue
+        # Check the token after 'worktree' is 'add'
+        j = i + 1
+        while j < len(tokens) and tokens[j].startswith("-"):
+            j += 1
+        if j < len(tokens) and tokens[j].lower() == "add":
+            return True
+    return False
 
 
 CONTEXT_ADVISORY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -380,13 +443,95 @@ CANONICAL_WORKTREE_ROOT = (
 ).rstrip("/")  # strip trailing slash to prevent prefix-check false negatives
 
 
+def _parse_worktree_add_args(command_flat: str) -> tuple[str, str]:
+    """Extract (path, branch) from a flat ``git worktree add`` command string.
+
+    Returns (worktree_path, branch) where either may be empty if not found.
+    The branch is extracted from ``-b <branch>`` or ``--track <branch>`` only;
+    a positional branch/ref argument is not parsed (too ambiguous).
+    """
+    tokens = command_flat.split()
+    worktree_path = ""
+    branch = ""
+    past_add = False
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "add":  # noqa: S105
+            past_add = True
+            i += 1
+            continue
+        if past_add:
+            if token in ("-b", "--track") and i + 1 < len(tokens):
+                branch = tokens[i + 1]
+                i += 2
+                continue
+            if not token.startswith("-") and not worktree_path:
+                worktree_path = token
+        i += 1
+    return worktree_path, branch
+
+
+def _get_repo_path_from_command(command_flat: str) -> str | None:
+    """Extract the ``-C <path>`` repo path from a git command, if present."""
+    tokens = command_flat.split()
+    for i, token in enumerate(tokens):
+        if token == "-C" and i + 1 < len(tokens):  # noqa: S105
+            return tokens[i + 1]
+    return None
+
+
+def _list_existing_worktrees(repo_path: str | None) -> list[tuple[str, str]]:
+    """Return list of (path, branch_short) for all registered worktrees.
+
+    Runs ``git worktree list --porcelain`` in *repo_path* (cwd if None).
+    Returns empty list on any error (fail-open for duplicate detection only;
+    path-canonicality check is the primary gate and always runs).
+    """
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["git", "worktree", "list", "--porcelain"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            cwd=repo_path,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode != 0:
+            return []
+    except Exception:  # noqa: BLE001
+        return []
+
+    entries: list[tuple[str, str]] = []
+    current_path = ""
+    current_branch = ""
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if current_path:
+                entries.append((current_path, current_branch))
+            current_path = ""
+            current_branch = ""
+            continue
+        if line.startswith("worktree "):
+            current_path = line[len("worktree ") :]
+        elif line.startswith("branch "):
+            ref = line[len("branch ") :]
+            prefix = "refs/heads/"
+            current_branch = ref[len(prefix) :] if ref.startswith(prefix) else ref
+    if current_path:
+        entries.append((current_path, current_branch))
+    return entries
+
+
 def _check_worktree_path(command: str) -> str | None:
-    """Check if a ``git worktree add`` targets the canonical root.
+    """Check if a ``git worktree add`` targets the canonical root, and that
+    neither the destination path nor the branch is already registered.
 
     Returns a block reason string if the command should be blocked,
     or ``None`` if it is allowed (or not a worktree add command).
 
-    Phase 1 supports the common form: ``git worktree add <path> [-b <branch>]``.
+    Supports the common form: ``git worktree add <path> [-b <branch>]``.
     Flags before the path (``--lock``, ``--detach``) cause the path to be
     unparseable, which triggers a conservative block (fail closed).
     """
@@ -394,21 +539,9 @@ def _check_worktree_path(command: str) -> str | None:
         return None
 
     # Normalize backslash line-continuations before tokenizing.
-    # Multi-line shell commands use `\` + newline as a continuation; split()
-    # treats `\` as a non-whitespace token which breaks path extraction.
-    # Only strip the continuation sequence (\+newline), not all backslashes.
     command_flat = command.replace("\\\n", " ")
 
-    # Tokenize and extract the first non-flag argument after "add"
-    tokens = command_flat.split()
-    worktree_path = ""
-    past_add = False
-    for token in tokens:
-        if past_add and not token.startswith("-"):
-            worktree_path = token
-            break
-        if token == "add":  # noqa: S105
-            past_add = True
+    worktree_path, branch = _parse_worktree_add_args(command_flat)
 
     if not worktree_path:
         return (
@@ -422,7 +555,66 @@ def _check_worktree_path(command: str) -> str | None:
             f"Got: {worktree_path}"
         )
 
+    # Duplicate detection — fail-open (empty list) if git is unavailable.
+    repo_path = _get_repo_path_from_command(command_flat)
+    existing = _list_existing_worktrees(repo_path)
+
+    resolved_path = (
+        str(Path(worktree_path).resolve())
+        if not worktree_path.startswith("/")
+        else worktree_path
+    )
+
+    for wt_path, wt_branch in existing:
+        if Path(wt_path).resolve() == Path(resolved_path).resolve():
+            return (
+                f"BLOCKED: worktree already exists at {wt_path}; "
+                "prune or reuse it (`git worktree prune` to clean stale entries)."
+            )
+        if branch and wt_branch and wt_branch == branch:
+            return (
+                f"BLOCKED: branch {branch!r} already checked out in {wt_path}; "
+                "use a different branch name or remove the existing worktree first."
+            )
+
     return None
+
+
+def _graphql_merge_method_var_mismatch(command: str) -> bool:
+    """Detect enablePullRequestAutoMerge(input.mergeMethod: $var) bound to MERGE/REBASE.
+
+    CodeRabbit OMN-9548-PR1393: the literal-value patterns in HARD_BLOCK_PATTERNS
+    miss variable-bound GraphQL mutations. A command such as
+
+        gh api graphql -F m=MERGE -f query='mutation($m: PullRequestMergeMethod!) {
+            enablePullRequestAutoMerge(input: {pullRequestId: "X", mergeMethod: $m}) {
+                clientMutationId
+            }
+        }'
+
+    would bypass the literal pattern even though the effective method is MERGE.
+    This helper ties the `mergeMethod: $var` placeholder back to its `-F var=VAL`
+    binding and returns True only when the bound value is MERGE or REBASE.
+
+    Limitations (acknowledged, out of guard scope):
+      - Nested substitution (e.g. `-F m=$OTHER`) is not resolved.
+      - `--field` long-form is not recognized (`gh` supports `-f` / `-F` only).
+    """
+    var_match = re.search(
+        r"enablePullRequestAutoMerge\s*\([\s\S]*?\bmergeMethod\s*:\s*\$(\w+)\b",
+        command,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if not var_match:
+        return False
+    var_name = re.escape(var_match.group(1))
+    return bool(
+        re.search(
+            rf"(?:^|\s)-[fF]\s+{var_name}\s*=\s*(?:MERGE|REBASE)\b",
+            command,
+            re.IGNORECASE | re.MULTILINE,
+        )
+    )
 
 
 def matches_any(command: str, patterns: list[re.Pattern[str]]) -> bool:
@@ -599,7 +791,10 @@ def main() -> int:
     # ------------------------------------------------------------------
     # Tier 1 — HARD_BLOCK
     # ------------------------------------------------------------------
-    if matches_any(command, HARD_BLOCK_PATTERNS) and not _is_claude_transient_rm_only:
+    _var_bound_mismatch = _graphql_merge_method_var_mismatch(command)
+    if (
+        matches_any(command, HARD_BLOCK_PATTERNS) or _var_bound_mismatch
+    ) and not _is_claude_transient_rm_only:
         _no_verify_re = re.compile(
             r"\bgit\b[^;|&\n]*--no-verify\b", re.IGNORECASE | re.MULTILINE
         )
@@ -685,14 +880,38 @@ def main() -> int:
                     "Human operators retain an emergency bypass via direct terminal access."
                 )
         elif re.search(
-            r"\bgh\s+pr\s+merge\b.*(?:^|\s)--auto\b",
+            r"\bgh\s+pr\s+merge\b(?=.*(?:^|\s)--auto\b)(?=.*(?:^|\s)--(?:merge|rebase)\b)",
             command,
             re.IGNORECASE | re.MULTILINE,
         ):
             block_reason = (
-                "BLOCKED: gh pr merge --auto silently picks wrong method. "
-                "Use GraphQL enablePullRequestAutoMerge with mergeMethod: SQUASH. "
-                "See OMN-8838."
+                "BLOCKED: gh pr merge --auto --merge / --auto --rebase mismatches the "
+                "SQUASH queue ruleset on OmniNode-ai repos and silently drops the queue "
+                "entry. Only `mergeMethod: SQUASH` / `--squash --auto` is permitted on "
+                "OmniNode-ai queue repos. Use `gh pr merge <N> --repo <org>/<repo> "
+                "--squash --auto`. See OMN-9547 / OMN-9548 for evidence."
+            )
+        elif re.search(
+            r"enablePullRequestAutoMerge\s*\([\s\S]*?\bmergeMethod\s*:\s*(?:MERGE|REBASE)\b",
+            command,
+            re.IGNORECASE | re.MULTILINE,
+        ):
+            block_reason = (
+                "BLOCKED: enablePullRequestAutoMerge with mergeMethod: MERGE or REBASE "
+                "mismatches the SQUASH queue ruleset on OmniNode-ai repos and silently "
+                "drops the queue entry. Only `mergeMethod: SQUASH` / `--squash --auto` "
+                "is permitted on OmniNode-ai queue repos. "
+                "Empirical evidence: omitting mergeMethod defaults to MERGE at the API "
+                "level (probed 2026-04-23); it does NOT inherit from the queue ruleset. "
+                "See OMN-9547 / OMN-9548."
+            )
+        elif _var_bound_mismatch:
+            block_reason = (
+                "BLOCKED: enablePullRequestAutoMerge with a variable-bound mergeMethod "
+                "($var) whose -F binding resolves to MERGE or REBASE mismatches the "
+                "SQUASH queue ruleset on OmniNode-ai repos and silently drops the queue "
+                "entry. Only `mergeMethod: SQUASH` / `--squash --auto` is permitted on "
+                "OmniNode-ai queue repos. See OMN-9547 / OMN-9548."
             )
         elif re.search(
             r"required_pull_request_reviews|required_approving_review_count",

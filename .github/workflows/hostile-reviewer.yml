@@ -33,7 +33,13 @@ jobs:
     name: Hostile Reviewer (adversarial gate)
     # self-hosted runner on .201 required — DeepSeek-R1 at :8001 is LAN-only  # onex-allow-internal-ip
     # LLM_DEEPSEEK_URL must be set in the runner's environment (Infisical or shell profile)
-    runs-on: [self-hosted, omnibase-ci]
+    runs-on: >-
+      ${{
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
+      }}
     timeout-minutes: 20
 
     steps:
@@ -43,15 +49,19 @@ jobs:
           fetch-depth: 0
 
       - name: Clean stale dependency clones
+        working-directory: ${{ github.workspace }}
         run: rm -rf ../omniintelligence ../omnibase_core ../omnibase_compat
 
       - name: Clone omniintelligence
+        working-directory: ${{ github.workspace }}
         run: git clone --depth=1 https://github.com/OmniNode-ai/omniintelligence.git ../omniintelligence
 
       - name: Clone omnibase_core
+        working-directory: ${{ github.workspace }}
         run: git clone --depth=1 https://github.com/OmniNode-ai/omnibase_core.git ../omnibase_core
 
       - name: Clone omnibase_compat
+        working-directory: ${{ github.workspace }}
         run: git clone --depth=1 https://github.com/OmniNode-ai/omnibase_compat.git ../omnibase_compat
 
       - name: Install uv
@@ -60,6 +70,7 @@ jobs:
           version: "latest"
 
       - name: Set up Python 3.12
+        working-directory: ${{ github.workspace }}
         run: uv python install 3.12
 
       - name: Install omniintelligence dependencies
@@ -138,7 +149,7 @@ jobs:
           fi
 
       - name: Post review summary as PR comment
-        if: always()
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         uses: actions/github-script@v9
         env:
           REVIEW_VERDICT: ${{ steps.review.outputs.verdict }}
@@ -225,11 +236,18 @@ jobs:
 
   hostile-review-gate:
     name: Hostile Review Gate
-    runs-on: [self-hosted, omnibase-ci]
+    runs-on: >-
+      ${{
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
+      }}
     needs: [hostile-review]
     if: always()
     steps:
       - name: Evaluate gate
+        working-directory: ${{ github.workspace }}
         run: |
           echo "=== Hostile Review Gate ==="
           RESULT="${{ needs.hostile-review.result }}"

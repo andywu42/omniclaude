@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -75,15 +76,18 @@ class ModelEvidenceWrittenEvent(BaseModel):
 def emit_event(event: ModelEvidenceWrittenEvent) -> None:
     """Emit an EvidenceWritten event to Kafka. Fail-open: logs on error."""
     try:
+        from omnimarket.nodes.node_emit_daemon.client import (
+            EmitClient,  # noqa: PLC0415, I001
+        )
+
         from omniclaude.hooks.topics import TopicBase, build_topic
 
-        try:
-            from omnimarket.nodes.node_emit_daemon.client import EmitClient  # noqa: PLC0415, I001
-        except ImportError:
-            from omniclaude.publisher.emit_client import EmitClient  # type: ignore[no-redef]  # noqa: PLC0415, I001
-
+        socket_path = os.getenv("OMNICLAUDE_EMIT_SOCKET", "").strip()
+        if not socket_path:
+            logger.debug("No emit socket configured, skipping evidence emission")
+            return
         topic = build_topic(TopicBase.EVIDENCE_WRITTEN)
-        client = EmitClient()
+        client = EmitClient(socket_path=socket_path)
         client.emit_sync(
             event_type=topic,
             payload=event.model_dump(mode="json"),

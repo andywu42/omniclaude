@@ -33,8 +33,8 @@ node_type: ORCHESTRATOR_GENERIC
 # Description
 description: >
   Orchestrator node for the delegate skill.
-  Delegate tasks to the ONEX node-based delegation pipeline via Kafka command event. Classifies prompt, wraps in envelope, publishes to delegation-request topic.
-  Dispatches skill invocations to the polymorphic agent via the shared
+  Delegate tasks to the ONEX node-based delegation pipeline via Kafka command event. Classifies prompt, wraps in envelope, publishes to delegate-task topic (onex.cmd.omniclaude.delegate-task.v1).
+  Dispatches skill invocations to the general-purpose agent via the shared
   handle_skill_requested handler. Subscribes to command events, emits
   outcome events on success or failure.
 
@@ -56,7 +56,7 @@ execution:
 # Event bus configuration
 event_bus:
   subscribe:
-    topic: "onex.cmd.omniclaude.delegate.v1"
+    topic: "onex.cmd.omniclaude.delegate-task.v1"
     consumer_group: "omniclaude.skill.delegate"
   publish:
     success_topic: "onex.evt.omniclaude.delegate-completed.v1"
@@ -64,7 +64,7 @@ event_bus:
 
   # Canonical topic registry (gap-analysis scanner) [OMN-3373]
   subscribe_topics:
-    - "onex.cmd.omniclaude.delegate.v1"
+    - "onex.cmd.omniclaude.delegate-task.v1"
   publish_topics:
     - "onex.evt.omniclaude.delegate-completed.v1"
     - "onex.evt.omniclaude.delegate-failed.v1"
@@ -72,13 +72,13 @@ event_bus:
 # Capabilities
 capabilities:
   - name: skill.delegate
-    description: Dispatch delegate skill to polymorphic agent
+    description: Dispatch delegate skill to general-purpose agent
     version: 1.0.0
 
 # IO operations
 io_operations:
   - operation: skill_requested
-    description: Dispatch delegate skill invocation to polymorphic agent
+    description: Dispatch delegate skill invocation to general-purpose agent
     handler_method: handle_skill_requested
     input_fields:
       - skill_name: str

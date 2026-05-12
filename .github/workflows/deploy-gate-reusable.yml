@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2025 OmniNode.ai Inc.
+# SPDX-License-Identifier: MIT
+#
+# Reusable workflow: deploy-gate validator (DGM-Phase6, OMN-9734).
+# Canonical source — all repos call this via uses: instead of running
+# their own copy of validate_pr_deploy_required.py.
+#
+# Canonical validator: OMN-9685 (omnibase_core PR #902, 2026-04-25).
+# Centralised: OMN-9734 (DGM-Phase6). Supersedes DGM-Phase2.
+#
+# Usage in caller repos:
+#   jobs:
+#     deploy-gate:
+#       uses: OmniNode-ai/omniclaude/.github/workflows/deploy-gate-reusable.yml@main
+#       secrets: inherit
+
+name: Deploy Gate (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      pr-number:
+        description: PR number to validate (defaults to github.event.pull_request.number)
+        type: number
+        required: false
+        default: 0
+      contracts-dir:
+        description: Path to ticket contracts directory relative to repo root
+        type: string
+        required: false
+        default: contracts
+
+jobs:
+  deploy-gate:
+    name: deploy-gate
+    # OMNI_RUNNER_SELECTOR_V1 - trusted CI defaults to self-hosted omnibase-ci; public forks default to ubuntu-latest
+    runs-on: >-
+      ${{
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
+      }}
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@v6
+
+      - name: Skip on merge_group
+        if: github.event_name == 'merge_group'
+        working-directory: ${{ github.workspace }}
+        run: |
+          echo "::notice::deploy-gate: merge_group event — skipped (validated on PR branch)."
+
+      - name: Run deploy gate (canonical composite action)
+        if: github.event_name != 'merge_group'
+        uses: OmniNode-ai/omniclaude/.github/actions/deploy-gate@main
+        with:
+          pr-number: ${{ inputs.pr-number != 0 && inputs.pr-number || github.event.pull_request.number }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          contracts-dir: ${{ inputs.contracts-dir }}

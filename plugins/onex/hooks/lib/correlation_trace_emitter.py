@@ -12,7 +12,7 @@ Architecture (three-layer separation):
     - Schema (omniclaude.hooks.schemas): ModelCorrelationTraceSpanPayload -- pure data
     - Adapter layer (this module): Owns daemon integration -- validates payload,
       calls emit_event(), provides convenience helpers
-    - Emit daemon (omniclaude publisher): Routes flat JSON to Kafka topic
+    - Emit daemon (omnimarket node_emit_daemon): Routes flat JSON to Kafka topic
 
 INVARIANT: This function MUST fail open and NEVER block hook/session execution.
 If Kafka/daemon is unavailable, log warning and return False.
@@ -27,7 +27,6 @@ Related Tickets:
 from __future__ import annotations
 
 import logging
-import os
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -68,7 +67,7 @@ def emit_trace_span(
         span_id: Unique identifier for this span. Defaults to a new UUID.
         parent_span_id: ID of the parent span (None for root spans).
         correlation_id: Correlation ID for distributed tracing. Defaults to trace_id.
-        session_id: Session ID. Defaults to SESSION_ID env var or "unknown".
+        session_id: Session ID. Defaults to CLAUDE_CODE_SESSION_ID env var or "unknown".
         ended_at: When the span ended (UTC, None if still in progress).
         duration_ms: Duration in milliseconds (None if still in progress).
         metadata: Key-value metadata for the span. Must not contain secrets.
@@ -114,10 +113,10 @@ def emit_trace_span(
         resolved_correlation_id = (
             correlation_id if correlation_id is not None else resolved_trace_id
         )
+        from .session_id import resolve_session_id  # noqa: PLC0415
+
         resolved_session_id = (
-            session_id
-            if session_id is not None
-            else os.environ.get("SESSION_ID", "unknown")
+            session_id if session_id is not None else resolve_session_id()
         )
 
         # Build validated payload -- Pydantic enforces all constraints

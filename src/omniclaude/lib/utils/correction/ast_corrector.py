@@ -39,8 +39,8 @@ try:
 except ImportError:
     LIBCST_AVAILABLE = False
     LIBCST_AVAIL = False
-    cst = None  # type: ignore[assignment,unused-ignore]
-    metadata = None  # type: ignore[assignment,unused-ignore]
+    cst = None  # type: ignore[assignment,unused-ignore]  # Why: libcst unavailable, sentinel for conditional base class
+    metadata = None  # type: ignore[assignment,unused-ignore]  # Why: libcst unavailable, sentinel for conditional metadata
     logger.warning(
         "libcst not available - falling back to regex-based corrections. "
         "Install libcst for AST-aware corrections: pip install libcst"
@@ -60,7 +60,7 @@ class CorrectionResult:
     performance_ms: float | None = None
 
 
-class ContextAwareRenameTransformer(cst.CSTTransformer if LIBCST_AVAIL else object):  # type: ignore[misc]
+class ContextAwareRenameTransformer(cst.CSTTransformer if LIBCST_AVAIL else object):  # type: ignore[misc]  # Why: conditional base class when libcst unavailable
     """
     libcst transformer for surgical, position-aware identifier renaming.
 
@@ -72,11 +72,11 @@ class ContextAwareRenameTransformer(cst.CSTTransformer if LIBCST_AVAIL else obje
     """
 
     if LIBCST_AVAIL:
-        METADATA_DEPENDENCIES = (metadata.PositionProvider,)  # type: ignore[union-attr,unused-ignore]
+        METADATA_DEPENDENCIES = (metadata.PositionProvider,)  # type: ignore[union-attr,unused-ignore]  # Why: guarded by LIBCST_AVAIL, metadata is None otherwise
 
     def __init__(
         self,
-        corrections: dict[tuple[Any, Any, Any], Any],
+        corrections: dict[tuple[int | None, int | None, str | None], str | None],  # Why: keys built from .get() which may be None
         framework_detector: FrameworkMethodDetector,
         original_tree: ast.Module,
     ) -> None:
@@ -89,7 +89,7 @@ class ContextAwareRenameTransformer(cst.CSTTransformer if LIBCST_AVAIL else obje
             original_tree: Original AST tree for framework detection
         """
         super().__init__()
-        self.corrections: dict[tuple[int, int, str], str] = corrections  # type: ignore[assignment]
+        self.corrections: dict[tuple[int, int, str], str] = corrections  # type: ignore[assignment]  # Why: caller passes dict[Any,Any,Any],Any which narrows at runtime
         self.framework_detector = framework_detector
         self.original_tree = original_tree
         self.corrections_applied = 0
@@ -170,7 +170,7 @@ class ContextAwareRenameTransformer(cst.CSTTransformer if LIBCST_AVAIL else obje
         self.current_function = None
         return updated_node
 
-    def leave_Name(self, original_node: Any, updated_node: Any) -> Any:  # noqa: N802
+    def leave_Name(self, original_node: Any, updated_node: Any) -> Any:  # noqa: N802  # Why: libcst.CSTNode subtype — exact type varies by visitor context
         """Rename variable/identifier names at specific line/column positions."""
         if not LIBCST_AVAILABLE:
             return updated_node

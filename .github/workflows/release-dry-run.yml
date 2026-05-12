@@ -11,17 +11,26 @@ on:
 
 jobs:
   dry-run:
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
+      }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: '3.12'
       - name: Build only (no publish)
+        working-directory: ${{ github.workspace }}
         run: uv build
       - name: Verify artifacts
+        working-directory: ${{ github.workspace }}
         run: |
           ls dist/*.whl dist/*.tar.gz
           sha256sum dist/*.whl dist/*.tar.gz

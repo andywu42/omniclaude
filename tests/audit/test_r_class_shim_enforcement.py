@@ -77,6 +77,15 @@ FORBIDDEN_PATTERNS = [
 # Files to scan within each skill directory (SKILL.md and any prompt.md)
 SCAN_GLOBS = ["SKILL.md", "prompt.md", "*.md"]
 
+RUN_NODE_ENVELOPE_FILES = [
+    SKILLS_ROOT / "agent_healthcheck" / "SKILL.md",
+    SKILLS_ROOT / "dispatch_queue_drainer" / "SKILL.md",
+    SKILLS_ROOT / "duplication_sweep" / "SKILL.md",
+    SKILLS_ROOT / "two_strike_arbiter" / "SKILL.md",
+    SKILLS_ROOT / "verification_receipt_generator" / "SKILL.md",
+    SKILLS_ROOT / "_shared" / "skill_orchestrator_template.md",
+]
+
 
 def _collect_violations() -> list[tuple[str, str, str]]:
     """Return list of (skill, file, matched_line) for every violation."""
@@ -111,3 +120,32 @@ def test_zero_uv_run_python_in_r_class_skills() -> None:
             + "\n".join(lines)
         )
         pytest.fail(msg)
+
+
+def test_runtime_backed_shims_use_run_node_input_envelopes() -> None:
+    """Dogfood gate: runtime-backed shims must match the actual run-node CLI."""
+    violations = []
+    for path in RUN_NODE_ENVELOPE_FILES:
+        text = path.read_text(encoding="utf-8")
+        invocation_lines = []
+        for line in text.splitlines():
+            if re.search(r"^\s*(?:uv\s+run\s+)?onex\s+run-node\b", line):
+                invocation_lines.append(line)
+            if re.search(r"^\s*uv\s+run\s+onex\s+run\s+node_", line):
+                violations.append(
+                    f"{path.relative_to(SKILLS_ROOT)} uses nonexistent onex run"
+                )
+
+        if not invocation_lines:
+            violations.append(f"{path.relative_to(SKILLS_ROOT)} omits run-node")
+            continue
+
+        for line in invocation_lines:
+            if re.search(r"\bonex\s+run-node\s+\S+\s+--(?:\s+\S|\\\s*$|\s*$)", line):
+                violations.append(
+                    f"{path.relative_to(SKILLS_ROOT)} uses run-node -- flags"
+                )
+            if "--input" not in line:
+                violations.append(f"{path.relative_to(SKILLS_ROOT)} omits --input")
+
+    assert not violations, "\n".join(violations)

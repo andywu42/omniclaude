@@ -136,9 +136,9 @@ if base_branch is empty or error:
 
 ```
 Task(
-  subagent_type="onex:polymorphic-agent",
+  subagent_type="general-purpose",
   description="Resolve merge conflicts",
-  prompt="**AGENT REQUIREMENT**: You MUST be a polymorphic-agent.
+  prompt="**AGENT REQUIREMENT**: You MUST be a general-purpose.
 
     Resolve all merge conflicts on this branch. Base branch: {base_branch}.
 
@@ -340,11 +340,15 @@ Branch protection requires all review threads resolved before the merge queue
 accepts PRs, and CodeRabbit posts 5-20 automated comments per PR. This step
 is idempotent and safe to call on PRs with no CodeRabbit threads.
 
+When `pr_polish` runs under `node_pr_polish`, the node always invokes this
+skill with `--no-push` and owns CodeRabbit triage itself after the prompt
+phases complete. In that path the prompt must not mutate review threads.
+
 ```python
 # Uses resolve_coderabbit_threads() from @_lib/pr-safety/helpers.md
 from plugins.onex.skills._lib.pr_safety.helpers import resolve_coderabbit_threads
 
-if pr_number:
+if pr_number and not no_push:
     try:
         repo_full = run("gh pr view {pr_number} --json baseRepository --jq .baseRepository.nameWithOwner").strip()
         if repo_full:
@@ -354,6 +358,35 @@ if pr_number:
     except Exception as e:
         print(f"WARNING: Failed to resolve CodeRabbit threads: {e}")
         # Non-fatal: continue to push
+elif pr_number:
+    print("Skipping prompt-side CodeRabbit resolution (--no-push); node_pr_polish owns this phase.")
+```
+
+### Pre-Push pre-commit Gate (MANDATORY — OMN-8602)
+
+Before pushing, run the full pre-commit suite locally. This is a **hard gate** —
+push is skipped if any hook fails. Polish agents repeatedly pushed fixes without
+running pre-commit, which surfaced as the high-severity friction
+`pr_polish:tooling/agents-skip-precommit-before-push`. See
+`.onex_state/friction/friction.ndjson` for the originating event.
+
+```python
+if not no_push and (phase_0_status == "OK" or phase_1_status == "OK" or phase_2_status == "OK"):
+    # NEVER use --no-verify. NEVER skip this gate. If hooks fail, fix the
+    # underlying issue and re-run; do not push broken code and let CI catch it.
+    pre_commit_result = run("uv run pre-commit run --all-files")
+    if pre_commit_result.returncode != 0:
+        print(
+            "BLOCKED: pre-commit run --all-files failed. "
+            "Fix the reported violations, then re-run pr-polish. "
+            "DO NOT push with --no-verify."
+        )
+        precommit_status = "FAILED"
+        # Skip push entirely — agent must fix and re-run.
+        goto Final Report
+    else:
+        precommit_status = "OK"
+        print("Pre-push pre-commit gate: PASSED")
 ```
 
 ### Push
@@ -505,7 +538,7 @@ Announce: "I'm using the pr-polish skill to bring PR #226 to merge-ready state."
 Phase 0: Conflict Resolution
   git status → 2 conflicted files: [src/foo.py, tests/test_foo.py]
   Base branch: main
-  [dispatch polymorphic-agent to resolve conflicts]
+  [dispatch general-purpose to resolve conflicts]
   Phase 0: Resolved 2 file(s) — committed (fix(merge): resolve conflicts against main)
 
 Phase 1: PR Review + CI Fix

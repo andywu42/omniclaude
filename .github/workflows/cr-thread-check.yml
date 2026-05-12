@@ -1,19 +1,36 @@
 name: CR Thread Check
 on:
+  merge_group:
   pull_request:
     types: [opened, synchronize, reopened]
   pull_request_review:
     types: [submitted, dismissed]
   pull_request_review_comment:
     types: [created, edited, deleted]
-  pull_request_review_thread:
-    types: [resolved, unresolved]
   issue_comment:
     types: [created, edited, deleted]
 jobs:
+  merge-queue-compat:
+    if: github.event_name == 'merge_group'
+    runs-on: >-
+      ${{
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
+      }}
+    steps:
+      - name: Legacy queue compatibility
+        working-directory: ${{ github.workspace }}
+        run: echo "CR thread gate is enforced by cr-thread-gate-caller.yml on merge queue."
+
   cr-thread-gate:
-    if: (github.event_name != 'issue_comment' || github.event.issue.pull_request != null) && github.actor != 'dependabot[bot]'
-    uses: OmniNode-ai/omniclaude/.github/workflows/cr-thread-gate.yml@main
+    if: >-
+      github.event_name != 'merge_group' &&
+      (github.event_name != 'issue_comment' || github.event.issue.pull_request != null) &&
+      github.actor != 'dependabot[bot]'
+    uses: ./.github/workflows/cr-thread-gate.yml
     with:
       pr-number: ${{ github.event.pull_request.number || github.event.issue.number }}
-      github-token: ${{ secrets.CROSS_REPO_PAT }}
+    secrets:
+      CROSS_REPO_PAT: ${{ secrets.CROSS_REPO_PAT }}

@@ -99,11 +99,11 @@ class PluginClaude:
         self,
         config: ModelDomainPluginConfig,
     ) -> ModelDomainPluginResult:
-        """Start the EmbeddedEventPublisher via lifecycle.on_start().
+        """Start the omnimarket emit daemon via lifecycle.on_start().
 
-        Creates a ``PublisherConfig`` (reads ``OMNICLAUDE_PUBLISHER_*`` from
-        env) and starts the publisher.  On failure the half-initialised
-        resources are cleaned up and a ``.failed()`` result is returned.
+        Creates the runtime-managed daemon wrapper and starts the socket
+        server/publisher loop. On failure the half-initialised resources are
+        cleaned up and a ``.failed()`` result is returned.
         """
         from omnibase_infra.runtime.protocol_domain_plugin import (
             ModelDomainPluginResult,
@@ -129,9 +129,9 @@ class PluginClaude:
         return ModelDomainPluginResult(
             plugin_id=_PLUGIN_ID,
             success=True,
-            message="EmbeddedEventPublisher started",
+            message="Emit daemon started",
             resources_created=[
-                "embedded-event-publisher",
+                "omnimarket-emit-daemon",
                 "kafka-connection",
             ],
         )
@@ -345,12 +345,12 @@ class PluginClaude:
 
         # Determine message based on whether publisher was stopped
         publisher_diags = [
-            d for d in diagnostics if d.component == "EmbeddedEventPublisher"
+            d for d in diagnostics if d.component == "OmnimarketEmitDaemon"
         ]
         if publisher_diags:
             return ModelDomainPluginResult.succeeded(
                 plugin_id=_PLUGIN_ID,
-                message="Publisher stopped",
+                message="Emit daemon stopped",
             )
 
         return ModelDomainPluginResult.succeeded(
@@ -366,7 +366,7 @@ class PluginClaude:
         """Return human-readable status for diagnostics."""
         if self._state.publisher is None:
             return "disabled"
-        return "enabled (Publisher + Kafka)"
+        return "enabled (Emit daemon + Kafka)"
 
     # ------------------------------------------------------------------
     # Backward-compat accessors for tests that inspect internal state
@@ -378,7 +378,7 @@ class PluginClaude:
 
     @_publisher.setter
     def _publisher(self, value: object) -> None:
-        self._state.publisher = value  # type: ignore[assignment]
+        self._state.publisher = value  # type: ignore[assignment]  # Why: test mock injection through object-typed setter
 
     @property
     def _publisher_config(self) -> object | None:
@@ -394,7 +394,7 @@ class PluginClaude:
 
     @_vllm_backend.setter
     def _vllm_backend(self, value: object) -> None:
-        self._state.vllm_backend = value  # type: ignore[assignment]
+        self._state.vllm_backend = value  # type: ignore[assignment]  # Why: test mock injection through object-typed setter
 
     @property
     def _shutdown_in_progress(self) -> bool:
@@ -414,11 +414,11 @@ class PluginClaude:
         # Used by tests to inject mock stop events
         worker = self._state.workers.get("compliance-subscriber")
         if worker is not None:
-            worker.stop_event = value  # type: ignore[assignment]
+            worker.stop_event = value  # type: ignore[assignment]  # Why: test mock injection through object-typed setter
         elif value is not None:
             self._state.workers["compliance-subscriber"] = _WorkerDescriptor(
                 name="compliance-subscriber",
-                stop_event=value,  # type: ignore[arg-type]
+                stop_event=value,  # type: ignore[arg-type]  # Why: test mock injection through object-typed setter
             )
 
     @property
@@ -432,11 +432,11 @@ class PluginClaude:
         if value is not None:
             existing = self._state.workers.get("compliance-subscriber")
             if existing is not None:
-                existing.thread = value  # type: ignore[assignment]
+                existing.thread = value  # type: ignore[assignment]  # Why: test mock injection through object-typed setter
             else:
                 self._state.workers["compliance-subscriber"] = _WorkerDescriptor(
                     name="compliance-subscriber",
-                    thread=value,  # type: ignore[arg-type]
+                    thread=value,  # type: ignore[arg-type]  # Why: test mock injection through object-typed setter
                 )
         elif "compliance-subscriber" in self._state.workers:
             del self._state.workers["compliance-subscriber"]
@@ -450,11 +450,11 @@ class PluginClaude:
     def _decision_record_stop_event(self, value: object) -> None:
         worker = self._state.workers.get("decision-record-subscriber")
         if worker is not None:
-            worker.stop_event = value  # type: ignore[assignment]
+            worker.stop_event = value  # type: ignore[assignment]  # Why: test mock injection through object-typed setter
         elif value is not None:
             self._state.workers["decision-record-subscriber"] = _WorkerDescriptor(
                 name="decision-record-subscriber",
-                stop_event=value,  # type: ignore[arg-type]
+                stop_event=value,  # type: ignore[arg-type]  # Why: test mock injection through object-typed setter
             )
 
     @property
@@ -467,11 +467,11 @@ class PluginClaude:
         if value is not None:
             existing = self._state.workers.get("decision-record-subscriber")
             if existing is not None:
-                existing.thread = value  # type: ignore[assignment]
+                existing.thread = value  # type: ignore[assignment]  # Why: test mock injection through object-typed setter
             else:
                 self._state.workers["decision-record-subscriber"] = _WorkerDescriptor(
                     name="decision-record-subscriber",
-                    thread=value,  # type: ignore[arg-type]
+                    thread=value,  # type: ignore[arg-type]  # Why: test mock injection through object-typed setter
                 )
         elif "decision-record-subscriber" in self._state.workers:
             del self._state.workers["decision-record-subscriber"]

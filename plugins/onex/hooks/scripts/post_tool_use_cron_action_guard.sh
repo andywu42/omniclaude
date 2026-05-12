@@ -33,6 +33,7 @@ _BOOTSTRAP_STATE_DIR="${ONEX_STATE_DIR:-}"
 # common.sh provides PYTHON_CMD resolution and shared helpers.
 # shellcheck source=/dev/null
 source "${PLUGIN_ROOT}/hooks/scripts/common.sh"
+onex_hook_gate POST_TOOL_CRON_ACTION_GUARD || exit 0
 unset _SCRIPT_DIR _MODE_SH
 
 # Buffer stdin once so both the Python lib and the bootstrap check can use it.
@@ -56,7 +57,9 @@ if [[ -n "${_BOOTSTRAP_STATE_DIR:-}" ]] && command -v jq >/dev/null 2>&1; then
     mkdir -p "$SEEN_DIR"
 
     PROMPT="$(echo "$STDIN_DATA" | jq -r '.tool_input.prompt // empty' 2>/dev/null || true)"
-    SCHEDULE="$(echo "$STDIN_DATA" | jq -r '.tool_input.schedule // empty' 2>/dev/null || true)"
+    # Prefer .tool_input.cron (canonical key); fall back to .tool_input.schedule for
+    # payloads using the legacy key during the transition window [OMN-9003].
+    SCHEDULE="$(echo "$STDIN_DATA" | jq -r '.tool_input.cron // .tool_input.schedule // empty' 2>/dev/null || true)"
 
     if [[ -n "$PROMPT" ]]; then
         # Validate both schedule (cron expression) and prompt content to prevent

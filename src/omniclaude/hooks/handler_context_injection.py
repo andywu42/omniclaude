@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
 import json
 import logging
 import os
@@ -125,7 +126,9 @@ def _get_emit_event() -> Callable[..., bool]:
         try:
             from plugins.onex.hooks.lib.emit_client_wrapper import emit_event
         except ImportError:
-            from emit_client_wrapper import emit_event  # type: ignore[no-redef]
+            from emit_client_wrapper import (  # type: ignore[no-redef]  # Why: fallback import — emit_event defined in both try/except branches
+                emit_event,
+            )
 
         _emit_event_func = emit_event
     return _emit_event_func
@@ -929,12 +932,9 @@ class HandlerContextInjection:
                     start_projection_consumer_if_configured as _start_consumer,
                 )
             except ImportError:
-                from pattern_cache import (  # type: ignore[no-redef]
-                    get_pattern_cache as _get_pattern_cache,
-                )
-                from pattern_cache import (  # type: ignore[no-redef]
-                    start_projection_consumer_if_configured as _start_consumer,
-                )
+                pattern_cache = importlib.import_module("pattern_cache")
+                _get_pattern_cache = pattern_cache.get_pattern_cache
+                _start_consumer = pattern_cache.start_projection_consumer_if_configured
         except ImportError as exc:
             logger.warning("pattern_cache module unavailable (ImportError): %s", exc)
         else:

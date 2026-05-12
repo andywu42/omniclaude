@@ -34,15 +34,13 @@ jobs:
   # ============================================================================
   database-integration:
     name: Database Integration Tests
-    # OMNINODE_SELF_HOSTED_RUNS_ON_V1 — do not edit inline; update plan + all occurrences together
+    # OMNI_RUNNER_SELECTOR_V1 - trusted CI defaults to self-hosted omnibase-ci; public forks default to ubuntu-latest
     runs-on: >-
       ${{
-        (vars.USE_SELF_HOSTED_RUNNERS == 'true' &&
-         (github.event_name == 'push' ||
-          github.event_name == 'workflow_dispatch' ||
-          github.event_name == 'schedule'))
-        && fromJSON('["self-hosted","omnibase-ci"]')
-        || fromJSON('["ubuntu-latest"]')
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
       }}
     timeout-minutes: 20  # Prevent infinite hangs
 
@@ -71,17 +69,20 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
+        working-directory: ${{ github.workspace }}
         run: pip install --no-cache-dir uv
 
       - name: Load cached venv
+        if: ${{ vars.OMNI_ENABLE_VENV_CACHE_RESTORE == 'true' }}
         id: cached-uv-dependencies
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: .venv
           key: venv-${{ runner.os }}-${{ hashFiles('**/uv.lock') }}
 
       - name: Install dependencies
         if: steps.cached-uv-dependencies.outputs.cache-hit != 'true'
+        working-directory: ${{ github.workspace }}
         run: uv sync --frozen --group dev
 
       - name: Initialize database schema
@@ -92,6 +93,7 @@ jobs:
           POSTGRES_PASSWORD: test_password
           POSTGRES_DATABASE: test_omniclaude
           PGPASSWORD: test_password
+        working-directory: ${{ github.workspace }}
         run: |
           echo "::group::Initializing Database Schema"
 
@@ -128,6 +130,7 @@ jobs:
       - name: Verify database schema
         env:
           PGPASSWORD: test_password
+        working-directory: ${{ github.workspace }}
         run: |
           echo "::group::Database Schema Verification"
 
@@ -171,6 +174,7 @@ jobs:
           POSTGRES_USER: test_user
           POSTGRES_PASSWORD: test_password
           POSTGRES_DATABASE: test_omniclaude
+        working-directory: ${{ github.workspace }}
         run: |
           echo "::group::Database Operations Tests"
 
@@ -190,6 +194,7 @@ jobs:
         if: always()
         env:
           PGPASSWORD: test_password
+        working-directory: ${{ github.workspace }}
         run: |
           echo "::group::Resource Leak Detection"
           # Check database connections
@@ -212,6 +217,7 @@ jobs:
       - name: Test UUID field handling
         env:
           PGPASSWORD: test_password
+        working-directory: ${{ github.workspace }}
         run: |
           echo "::group::UUID Field Handling Test"
 
@@ -263,15 +269,13 @@ jobs:
   # ============================================================================
   kafka-integration:
     name: Kafka Integration Tests
-    # OMNINODE_SELF_HOSTED_RUNS_ON_V1 — do not edit inline; update plan + all occurrences together
+    # OMNI_RUNNER_SELECTOR_V1 - trusted CI defaults to self-hosted omnibase-ci; public forks default to ubuntu-latest
     runs-on: >-
       ${{
-        (vars.USE_SELF_HOSTED_RUNNERS == 'true' &&
-         (github.event_name == 'push' ||
-          github.event_name == 'workflow_dispatch' ||
-          github.event_name == 'schedule'))
-        && fromJSON('["self-hosted","omnibase-ci"]')
-        || fromJSON('["ubuntu-latest"]')
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
       }}
     timeout-minutes: 20  # Prevent infinite hangs
 
@@ -294,12 +298,15 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
+        working-directory: ${{ github.workspace }}
         run: pip install --no-cache-dir uv
 
       - name: Install dependencies
+        working-directory: ${{ github.workspace }}
         run: uv sync --frozen --group dev
 
       - name: Verify Kafka/Redpanda connectivity
+        working-directory: ${{ github.workspace }}
         run: |
           echo "::group::Kafka Connectivity Test"
 
@@ -348,6 +355,7 @@ jobs:
           POSTGRES_USER: test_user
           POSTGRES_PASSWORD: test_password
           POSTGRES_DATABASE: test_omniclaude
+        working-directory: ${{ github.workspace }}
         run: |
           echo "::group::Kafka Event Publishing Tests"
 
@@ -372,6 +380,7 @@ jobs:
           POSTGRES_USER: test_user
           POSTGRES_PASSWORD: test_password
           POSTGRES_DATABASE: test_omniclaude
+        working-directory: ${{ github.workspace }}
         run: |
           echo "::group::Routing Event Flow Tests"
 
@@ -388,6 +397,7 @@ jobs:
 
       - name: Check for resource leaks
         if: always()
+        working-directory: ${{ github.workspace }}
         run: |
           echo "::group::Resource Leak Detection"
           # Check for unclosed file descriptors
@@ -421,15 +431,13 @@ jobs:
   # ============================================================================
   agent-observability:
     name: Agent Observability Tests
-    # OMNINODE_SELF_HOSTED_RUNS_ON_V1 — do not edit inline; update plan + all occurrences together
+    # OMNI_RUNNER_SELECTOR_V1 - trusted CI defaults to self-hosted omnibase-ci; public forks default to ubuntu-latest
     runs-on: >-
       ${{
-        (vars.USE_SELF_HOSTED_RUNNERS == 'true' &&
-         (github.event_name == 'push' ||
-          github.event_name == 'workflow_dispatch' ||
-          github.event_name == 'schedule'))
-        && fromJSON('["self-hosted","omnibase-ci"]')
-        || fromJSON('["ubuntu-latest"]')
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
       }}
     timeout-minutes: 20  # Prevent infinite hangs
 
@@ -468,9 +476,11 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
+        working-directory: ${{ github.workspace }}
         run: pip install --no-cache-dir uv
 
       - name: Install dependencies
+        working-directory: ${{ github.workspace }}
         run: uv sync --frozen --group dev
 
       - name: Initialize database
@@ -481,6 +491,7 @@ jobs:
           POSTGRES_PASSWORD: test_password
           POSTGRES_DATABASE: test_omniclaude
           PGPASSWORD: test_password
+        working-directory: ${{ github.workspace }}
         run: |
           until psql -h localhost -U test_user -d test_omniclaude -c '\q'; do
             sleep 2
@@ -507,6 +518,7 @@ jobs:
           POSTGRES_USER: test_user
           POSTGRES_PASSWORD: test_password
           POSTGRES_DATABASE: test_omniclaude
+        working-directory: ${{ github.workspace }}
         run: |
           echo "::group::Agent Execution Logging Tests"
 
@@ -524,6 +536,7 @@ jobs:
           POSTGRES_USER: test_user
           POSTGRES_PASSWORD: test_password
           POSTGRES_DATABASE: test_omniclaude
+        working-directory: ${{ github.workspace }}
         run: |
           echo "::group::Action Logging E2E Tests"
 
@@ -538,6 +551,7 @@ jobs:
           POSTGRES_USER: test_user
           POSTGRES_PASSWORD: test_password
           POSTGRES_DATABASE: test_omniclaude
+        working-directory: ${{ github.workspace }}
         run: |
           echo "::group::Transformation Event Logging Tests"
 
@@ -548,6 +562,7 @@ jobs:
       - name: Verify logging completeness
         env:
           PGPASSWORD: test_password
+        working-directory: ${{ github.workspace }}
         run: |
           echo "::group::Logging Completeness Verification"
 
@@ -587,15 +602,13 @@ jobs:
   # ============================================================================
   full-pipeline:
     name: Full Pipeline Integration Tests
-    # OMNINODE_SELF_HOSTED_RUNS_ON_V1 — do not edit inline; update plan + all occurrences together
+    # OMNI_RUNNER_SELECTOR_V1 - trusted CI defaults to self-hosted omnibase-ci; public forks default to ubuntu-latest
     runs-on: >-
       ${{
-        (vars.USE_SELF_HOSTED_RUNNERS == 'true' &&
-         (github.event_name == 'push' ||
-          github.event_name == 'workflow_dispatch' ||
-          github.event_name == 'schedule'))
-        && fromJSON('["self-hosted","omnibase-ci"]')
-        || fromJSON('["ubuntu-latest"]')
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
       }}
     timeout-minutes: 25  # Prevent infinite hangs (longer for full pipeline)
 
@@ -634,9 +647,11 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
+        working-directory: ${{ github.workspace }}
         run: pip install --no-cache-dir uv
 
       - name: Install dependencies
+        working-directory: ${{ github.workspace }}
         run: uv sync --frozen --group dev
 
       - name: Initialize database
@@ -647,6 +662,7 @@ jobs:
           POSTGRES_PASSWORD: test_password
           POSTGRES_DATABASE: test_omniclaude
           PGPASSWORD: test_password
+        working-directory: ${{ github.workspace }}
         run: |
           until psql -h localhost -U test_user -d test_omniclaude -c '\q'; do
             sleep 2
@@ -674,6 +690,7 @@ jobs:
           POSTGRES_PASSWORD: test_password
           POSTGRES_DATABASE: test_omniclaude
           REDIS_URL: redis://localhost:6379/0
+        working-directory: ${{ github.workspace }}
         run: |
           echo "::group::Full Pipeline Integration Tests"
 
@@ -708,15 +725,13 @@ jobs:
   # ============================================================================
   integration-summary:
     name: Integration Tests Summary
-    # OMNINODE_SELF_HOSTED_RUNS_ON_V1 — do not edit inline; update plan + all occurrences together
+    # OMNI_RUNNER_SELECTOR_V1 - trusted CI defaults to self-hosted omnibase-ci; public forks default to ubuntu-latest
     runs-on: >-
       ${{
-        (vars.USE_SELF_HOSTED_RUNNERS == 'true' &&
-         (github.event_name == 'push' ||
-          github.event_name == 'workflow_dispatch' ||
-          github.event_name == 'schedule'))
-        && fromJSON('["self-hosted","omnibase-ci"]')
-        || fromJSON('["ubuntu-latest"]')
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
       }}
     needs:
       - database-integration
@@ -732,6 +747,7 @@ jobs:
           path: test-results/
 
       - name: Generate summary report
+        working-directory: ${{ github.workspace }}
         run: |
           echo "# Integration Tests Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -780,6 +796,7 @@ jobs:
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
       - name: Check integration test status
+        working-directory: ${{ github.workspace }}
         run: |
           # Fail if any integration test suite failed
           FAILED=0

@@ -10,8 +10,6 @@ author: omninode
 composable: true
 node_dispatch: node_platform_diagnostics
 node_dispatch_dimensions: DATABASE_PROJECTIONS
-migration_status: thin_shell
-migration_target: node_database_sweep
 migration_epic: OMN-8004
 args:
   - name: --dry-run
@@ -290,7 +288,7 @@ Skip ticket creation for:
 
 ## Dispatch Rules
 
-- ALL work dispatched through `onex:polymorphic-agent`
+- ALL work dispatched through `general-purpose`
 - NEVER edit files directly from orchestrator context
 - `--dry-run` produces zero side effects (no tickets)
 

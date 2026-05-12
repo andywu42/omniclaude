@@ -25,10 +25,8 @@ if [[ "${OMNICLAUDE_HOOKS_DISABLED:-0}" == "1" ]]; then
     cat
     exit 0
 fi
-if [[ "${OMNICLAUDE_HOOK_ENV_SYNC:-1}" == "0" ]]; then
-    cat
-    exit 0
-fi
+source "$(dirname "${BASH_SOURCE[0]}")/hook-gate.sh" 2>/dev/null || true
+onex_hook_gate ENV_SYNC || exit 0
 
 # -----------------------------------------------------------------------
 # Read stdin

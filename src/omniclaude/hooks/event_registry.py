@@ -646,11 +646,13 @@ EVENT_REGISTRY: dict[str, EventRegistration] = {
     # Emitted by the /delegate skill to trigger task delegation through the
     # node-based pipeline. The payload is a ModelEventEnvelope-compatible dict
     # so the runtime consumer can deserialize it directly.
-    "delegation.request": EventRegistration(
-        event_type="delegation.request",
+    # Event type renamed from "delegation.request" → "delegate.task" in OMN-10050
+    # to align with node_delegation_orchestrator contract topic.
+    "delegate.task": EventRegistration(
+        event_type="delegate.task",
         fan_out=[
             FanOutRule(
-                topic_base=TopicBase.DELEGATION_REQUEST,
+                topic_base=TopicBase.DELEGATE_TASK,
                 transform=None,  # Passthrough — payload is already envelope-shaped
                 description="Delegation request command for node_delegation_orchestrator",
             ),
@@ -710,7 +712,7 @@ EVENT_REGISTRY: dict[str, EventRegistration] = {
     # =========================================================================
     # NOTE: agent_name and session_id may carry the sentinel value "unknown".
     # This indicates the caller did not provide these fields explicitly and
-    # the corresponding environment variables (AGENT_NAME, SESSION_ID) were
+    # the corresponding environment variables (AGENT_NAME, CLAUDE_CODE_SESSION_ID) were
     # also unset. Consumers should treat "unknown" as "not provided", not as
     # a literal agent name or session identifier.
     "agent.status": EventRegistration(
@@ -1159,6 +1161,28 @@ EVENT_REGISTRY: dict[str, EventRegistration] = {
         ],
         partition_key_field="session_id",
         required_fields=["hook_name", "error_tier", "error_category", "session_id"],
+    ),
+    # =========================================================================
+    # Diagnostic Daemon Health (OMN-10126)
+    # =========================================================================
+    "diagnostic.daemon.health": EventRegistration(
+        event_type="diagnostic.daemon.health",
+        fan_out=[
+            FanOutRule(
+                topic_base=TopicBase.DIAGNOSTIC_DAEMON_HEALTH,
+                transform=None,
+                description="Portable daemon health diagnostic event",
+            ),
+        ],
+        partition_key_field="daemon_id",
+        required_fields=[
+            "daemon_id",
+            "pid",
+            "socket_path",
+            "kafka_offset",
+            "round_trip_ms",
+            "status",
+        ],
     ),
     # =========================================================================
     # LLM Cost Telemetry (OMN-7570)

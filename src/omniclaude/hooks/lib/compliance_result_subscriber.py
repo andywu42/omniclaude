@@ -38,6 +38,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 from omniclaude.hooks.topics import TopicBase
@@ -48,7 +49,9 @@ logger = logging.getLogger(__name__)
 # Topic constant (mirrors TopicBase.COMPLIANCE_EVALUATED)
 # ---------------------------------------------------------------------------
 
-COMPLIANCE_EVALUATED_TOPIC = TopicBase.COMPLIANCE_EVALUATED
+COMPLIANCE_EVALUATED_TOPIC = (
+    TopicBase.COMPLIANCE_EVALUATED
+)  # onex-topic-allow: pending contract auto-wiring
 
 # ---------------------------------------------------------------------------
 # Lazy import helpers for kafka-python
@@ -112,7 +115,7 @@ def _parse_compliance_result(raw: bytes) -> dict[str, Any] | None:
 
 
 def violations_to_advisories(
-    violations: list[Any],
+    violations: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Filter violated entries and transform to PatternAdvisory format.
 
@@ -129,9 +132,6 @@ def violations_to_advisories(
     advisories: list[dict[str, Any]] = []
 
     for v in violations:
-        # Guard: skip non-dict entries before entering the try block
-        if not isinstance(v, dict):
-            continue
         try:
             # Filter: only transform entries where violated is True
             violated = v.get("violated", False)
@@ -307,12 +307,12 @@ def run_subscriber(
     group_id: str = "omniclaude-compliance-subscriber.v1",
     poll_timeout_ms: int = 1000,
     max_poll_records: int = 50,
-    stop_event: Any = None,
+    stop_event: threading.Event | None = None,
 ) -> None:
     """Run a blocking Kafka consumer loop for compliance-evaluated events.
 
     Designed to run in a background thread (or daemon process) launched by
-    SessionStart. Exits when `stop_event` is set or on unrecoverable error.
+    SessionStart. Exits when ``stop_event`` is set or on unrecoverable error.
 
     All KafkaConsumer parameters are chosen for low-latency advisory delivery:
     - `auto_offset_reset="latest"`: only process new events (not historical ones)
@@ -397,7 +397,7 @@ def run_subscriber_background(
     *,
     kafka_bootstrap_servers: str,
     group_id: str = "omniclaude-compliance-subscriber.v1",
-    stop_event: Any = None,
+    stop_event: threading.Event | None = None,
 ) -> threading.Thread:
     """Launch ``run_subscriber`` in a daemon background thread.
 
@@ -476,7 +476,7 @@ def main() -> None:
 
             import signal  # noqa: PLC0415
 
-            def _handle_signal(sig: int, frame: Any) -> None:
+            def _handle_signal(sig: int, frame: FrameType | None) -> None:
                 stop_event.set()
 
             signal.signal(signal.SIGTERM, _handle_signal)

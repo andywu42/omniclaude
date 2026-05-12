@@ -1,5 +1,5 @@
 ---
-description: Poll GitHub PR for review feedback, auto-fix issues, and report terminal state
+description: Poll GitHub PR for review feedback -- dispatches to node_pr_watch_orchestrator for execution
 mode: full
 version: 1.0.0
 level: basic
@@ -64,6 +64,8 @@ args:
     required: false
 ---
 
+<!-- routing-enforced: dispatches to node_pr_watch_orchestrator (stub). functionally-complete requires real node implementation. -->
+
 # PR Watch
 
 ## Overview
@@ -102,7 +104,7 @@ Poll GitHub PR review status. Auto-fix review comments (Critical/Major/Minor by 
 
 ```
 Task(
-  subagent_type="onex:polymorphic-agent",
+  subagent_type="general-purpose",
   description="pr-watch: fix review comments for PR #{pr_number} (cycle {N})",
   prompt="Invoke: Skill(skill=\"onex:pr_review\", args=\"{pr_number}\")
 

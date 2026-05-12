@@ -8,6 +8,19 @@
 # thresholds without an Agent spawn, exits 2 (hard-block) to prevent inline
 # execution. Thresholds are read from config.yaml via delegation-config.sh.
 #
+# KILL-SWITCHES (short-circuit BEFORE any threshold logic) [OMN-9140]:
+#   env  OMNICLAUDE_HOOKS_DISABLE=1             — disable all omniclaude hooks
+#   file ~/.claude/omniclaude-hooks-disabled    — file marker, same effect
+#   Use either one in an emergency to unblock a trapped session without a plugin
+#   uninstall. The daemon also respects OMNICLAUDE_HOOKS_DISABLE (server.py).
+#
+# SUB-AGENT EXEMPTION [OMN-9140]:
+#   subagent-start.sh writes a marker to
+#   $ONEX_STATE_DIR/hooks/subagent-sessions/<session_id>.marker. Task()-spawned
+#   sub-agents inherit a distinct session_id; when the marker is present this
+#   hook short-circuits pass so sub-agents are never blocked (they cannot call
+#   Agent() to satisfy the delegation rule).
+#
 # Write/modify tools counted: Write, Edit, Bash (mutating), MultiEdit
 # Read-only tools counted: Read, Glob, Grep, WebFetch, WebSearch, Bash (read-only)
 # Delegation detected: Task tool (what Agent() maps to at hook level)
@@ -30,9 +43,18 @@
 
 set -euo pipefail
 _OMNICLAUDE_HOOK_NAME="$(basename "${BASH_SOURCE[0]}")"
+
+# --- Kill-switch [OMN-9140] ---
+# Short-circuit BEFORE any threshold logic runs. Drain stdin passthrough.
+if [[ "${OMNICLAUDE_HOOKS_DISABLE:-0}" == "1" ]] || [[ -f "${HOME}/.claude/omniclaude-hooks-disabled" ]]; then
+    cat
+    exit 0
+fi
+
 # Resolve script dir before cd $HOME (relative paths break after cwd change)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/error-guard.sh" 2>/dev/null || true
+onex_hook_gate POST_TOOL_DELEGATION_COUNTER || exit 0
 # shellcheck source=hook-runtime-client.sh
 source "${SCRIPT_DIR}/hook-runtime-client.sh" 2>/dev/null || true
 
@@ -58,6 +80,17 @@ if [[ -z "$SESSION_ID" ]]; then
     exit 0
 fi
 
+# --- Sub-agent exemption [OMN-9140] ---
+# Task()-spawned sub-agents cannot call Agent() to satisfy the delegation rule,
+# so they would otherwise hard-block. SubagentStart writes a marker file per
+# sub-agent session; presence → short-circuit pass.
+_SUBAGENT_MARKER_DIR="${ONEX_STATE_DIR:-${HOME}/.onex_state}/hooks/subagent-sessions"
+if [[ -f "${_SUBAGENT_MARKER_DIR}/${SESSION_ID}.marker" ]]; then
+    printf '%s\n' "$TOOL_INFO"
+    exit 0
+fi
+unset _SUBAGENT_MARKER_DIR
+
 # --- Source config reader (resilient — fallback to legacy defaults on any failure) ---
 _DC_LOADED=0
 if source "${SCRIPT_DIR}/delegation-config.sh" 2>/dev/null; then
@@ -65,19 +98,22 @@ if source "${SCRIPT_DIR}/delegation-config.sh" 2>/dev/null; then
 fi
 
 # --- Read thresholds from config ---
+# Defaults raised [OMN-9140] — prior tight values (write_block=5, total=15)
+# recursively trapped sessions. Generous defaults keep the enforcement advisory
+# while Claude Code exposes a reliable sub-agent signal.
 if [[ "$_DC_LOADED" -eq 1 ]]; then
-    WRITE_WARN=$(_dc_read '.write_warn_threshold' '3') || WRITE_WARN=3
-    WRITE_BLOCK=$(_dc_read '.write_block_threshold' '5') || WRITE_BLOCK=5
-    READ_WARN=$(_dc_read '.read_warn_threshold' '-1') || READ_WARN=-1
-    READ_BLOCK=$(_dc_read '.read_block_threshold' '-1') || READ_BLOCK=-1
-    TOTAL_BLOCK=$(_dc_read '.total_block_threshold' '-1') || TOTAL_BLOCK=-1
+    WRITE_WARN=$(_dc_read '.write_warn_threshold' '100') || WRITE_WARN=100
+    WRITE_BLOCK=$(_dc_read '.write_block_threshold' '500') || WRITE_BLOCK=500
+    READ_WARN=$(_dc_read '.read_warn_threshold' '200') || READ_WARN=200
+    READ_BLOCK=$(_dc_read '.read_block_threshold' '1000') || READ_BLOCK=1000
+    TOTAL_BLOCK=$(_dc_read '.total_block_threshold' '1500') || TOTAL_BLOCK=1500
 else
-    # Legacy defaults — no read enforcement
-    WRITE_WARN=3
-    WRITE_BLOCK=5
-    READ_WARN=-1
-    READ_BLOCK=-1
-    TOTAL_BLOCK=-1
+    # Fallback defaults (same as above) when config reader unavailable.
+    WRITE_WARN=100
+    WRITE_BLOCK=500
+    READ_WARN=200
+    READ_BLOCK=1000
+    TOTAL_BLOCK=1500
 fi
 
 # --- State files ---
@@ -165,13 +201,13 @@ if [[ -S "$HOOK_RUNTIME_SOCKET" ]]; then
         case "$DAEMON_DECISION" in
             block)
                 jq -n --arg msg "${DAEMON_MESSAGE}" \
-                    '{ hookSpecificOutput: { additionalContext: $msg } }'
+                    '{ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: $msg } }'
                 exit 2
                 ;;
             warn)
                 if [[ -n "$DAEMON_MESSAGE" ]]; then
                     jq -n --arg msg "${DAEMON_MESSAGE}" \
-                        '{ hookSpecificOutput: { additionalContext: $msg } }'
+                        '{ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: $msg } }'
                 fi
                 printf '%s\n' "$TOOL_INFO"
                 exit 0
@@ -219,7 +255,8 @@ if [[ "$IS_WRITE_TOOL" -eq 1 ]]; then
             --argjson threshold "$TOTAL_BLOCK" \
             '{
                 hookSpecificOutput: {
-                    additionalContext: ("DELEGATION ENFORCER [HARD BLOCK]: " + ($count | tostring) + " total tool calls (" + $tool + " just now) without dispatching to a polymorphic agent. This tool call is BLOCKED. You MUST dispatch to onex:polymorphic-agent before continuing. Pattern: Agent(subagent_type=\"onex:polymorphic-agent\", description=\"...\", prompt=\"...\"). Inline work above the threshold is not permitted.")
+                    hookEventName: "PostToolUse",
+                    additionalContext: ("DELEGATION ENFORCER [HARD BLOCK]: " + ($count | tostring) + " total tool calls (" + $tool + " just now) without dispatching to a subagent. This tool call is BLOCKED. You MUST dispatch to a subagent before continuing. Pattern: Agent(subagent_type=\"general-purpose\", description=\"...\", prompt=\"...\"). Inline work above the threshold is not permitted.")
                 }
             }'
         exit 2
@@ -233,7 +270,8 @@ if [[ "$IS_WRITE_TOOL" -eq 1 ]]; then
             --argjson threshold "$WRITE_BLOCK" \
             '{
                 hookSpecificOutput: {
-                    additionalContext: ("DELEGATION ENFORCER [HARD BLOCK]: " + ($count | tostring) + " write/modify tool calls (" + $tool + " just now) without dispatching to a polymorphic agent. This tool call is BLOCKED. You MUST dispatch to onex:polymorphic-agent before continuing. Pattern: Agent(subagent_type=\"onex:polymorphic-agent\", description=\"...\", prompt=\"...\"). Inline work above the threshold is not permitted.")
+                    hookEventName: "PostToolUse",
+                    additionalContext: ("DELEGATION ENFORCER [HARD BLOCK]: " + ($count | tostring) + " write/modify tool calls (" + $tool + " just now) without dispatching to a subagent. This tool call is BLOCKED. You MUST dispatch to a subagent before continuing. Pattern: Agent(subagent_type=\"general-purpose\", description=\"...\", prompt=\"...\"). Inline work above the threshold is not permitted.")
                 }
             }'
         exit 2
@@ -248,7 +286,8 @@ if [[ "$IS_WRITE_TOOL" -eq 1 ]]; then
             --argjson block_threshold "$WRITE_BLOCK" \
             '{
                 hookSpecificOutput: {
-                    additionalContext: ("DELEGATION ENFORCER [WARNING]: " + ($count | tostring) + " write tool calls (" + $tool + " just now) without delegating. Hard block fires at " + ($block_threshold | tostring) + ". STOP and dispatch: Agent(subagent_type=\"onex:polymorphic-agent\", description=\"...\", prompt=\"...\"). Continuing inline fills the context window.")
+                    hookEventName: "PostToolUse",
+                    additionalContext: ("DELEGATION ENFORCER [WARNING]: " + ($count | tostring) + " write tool calls (" + $tool + " just now) without delegating. Hard block fires at " + ($block_threshold | tostring) + ". STOP and dispatch: Agent(subagent_type=\"general-purpose\", description=\"...\", prompt=\"...\"). Continuing inline fills the context window.")
                 }
             }'
     fi
@@ -288,7 +327,8 @@ else
             --argjson threshold "$TOTAL_BLOCK" \
             '{
                 hookSpecificOutput: {
-                    additionalContext: ("DELEGATION ENFORCER [HARD BLOCK]: " + ($count | tostring) + " total tool calls (" + $tool + " just now) without dispatching to a polymorphic agent. This tool call is BLOCKED. You MUST dispatch to onex:polymorphic-agent before continuing. Pattern: Agent(subagent_type=\"onex:polymorphic-agent\", description=\"...\", prompt=\"...\"). Inline work above the threshold is not permitted.")
+                    hookEventName: "PostToolUse",
+                    additionalContext: ("DELEGATION ENFORCER [HARD BLOCK]: " + ($count | tostring) + " total tool calls (" + $tool + " just now) without dispatching to a subagent. This tool call is BLOCKED. You MUST dispatch to a subagent before continuing. Pattern: Agent(subagent_type=\"general-purpose\", description=\"...\", prompt=\"...\"). Inline work above the threshold is not permitted.")
                 }
             }'
         exit 2
@@ -302,7 +342,8 @@ else
             --argjson threshold "$READ_BLOCK" \
             '{
                 hookSpecificOutput: {
-                    additionalContext: ("DELEGATION ENFORCER [HARD BLOCK]: " + ($count | tostring) + " read-only tool calls (" + $tool + " just now) without dispatching to a polymorphic agent. This tool call is BLOCKED. You MUST dispatch to onex:polymorphic-agent before continuing. Pattern: Agent(subagent_type=\"onex:polymorphic-agent\", description=\"...\", prompt=\"...\"). Inline work above the threshold is not permitted.")
+                    hookEventName: "PostToolUse",
+                    additionalContext: ("DELEGATION ENFORCER [HARD BLOCK]: " + ($count | tostring) + " read-only tool calls (" + $tool + " just now) without dispatching to a subagent. This tool call is BLOCKED. You MUST dispatch to a subagent before continuing. Pattern: Agent(subagent_type=\"general-purpose\", description=\"...\", prompt=\"...\"). Inline work above the threshold is not permitted.")
                 }
             }'
         exit 2
@@ -317,7 +358,8 @@ else
             --argjson block_threshold "$READ_BLOCK" \
             '{
                 hookSpecificOutput: {
-                    additionalContext: ("DELEGATION ENFORCER [WARNING]: " + ($count | tostring) + " read-only tool calls (" + $tool + " just now) without delegating. Hard block fires at " + ($block_threshold | tostring) + ". STOP and dispatch: Agent(subagent_type=\"onex:polymorphic-agent\", description=\"...\", prompt=\"...\"). Continuing inline fills the context window.")
+                    hookEventName: "PostToolUse",
+                    additionalContext: ("DELEGATION ENFORCER [WARNING]: " + ($count | tostring) + " read-only tool calls (" + $tool + " just now) without delegating. Hard block fires at " + ($block_threshold | tostring) + ". STOP and dispatch: Agent(subagent_type=\"general-purpose\", description=\"...\", prompt=\"...\"). Continuing inline fills the context window.")
                 }
             }'
     fi

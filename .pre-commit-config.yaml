@@ -40,7 +40,7 @@ repos:
       - id: no-hardcoded-topics
         stages: [pre-commit]
         # Pre-existing violations excluded pending migration to canonical constants
-        exclude: '^(src/omniclaude/hooks/(topic_allowlist|topic_registry)\.yaml|src/omniclaude/hooks/contracts/(contract_hook_.*|wire/.*)\.yaml|src/omniclaude/lib/(config/intelligence_config|core/intelligence_event_client)\.py|src/omniclaude/nodes/(contracts|.*/contracts)/.*\.yaml|src/omniclaude/nodes/node_agent_inbox_effect/handler_kafka_inbox\.py|src/omniclaude/runtime/(__main__|wiring_dispatchers)\.py|src/omniclaude/services/linear_relay/publisher\.py|plugins/onex/(hooks/lib/pattern_cache\.py|skills/_lib/contract_generator/generate_contract\.py)|schemas/quirks/.*\.yaml|scripts/(bus_audit|demo_runner|validation/validate_golden_chain_integrity)\.py|tests/validate_event_integration\.py|tests/integration/skills/aislop_sweep/fixtures/.*)$'
+        exclude: '^(src/omniclaude/hooks/(topic_allowlist|topic_registry)\.yaml|src/omniclaude/hooks/contracts/(contract_hook_.*|wire/.*)\.yaml|src/omniclaude/lib/(config/intelligence_config|core/intelligence_event_client)\.py|src/omniclaude/nodes/(contracts|.*/contracts)/.*\.yaml|src/omniclaude/nodes/node_agent_inbox_effect/handler_kafka_inbox\.py|src/omniclaude/runtime/(__main__|wiring_dispatchers)\.py|src/omniclaude/services/linear_relay/publisher\.py|plugins/onex/(hooks/lib/pattern_cache\.py|skills/_lib/contract_generator/generate_contract\.py)|schemas/quirks/.*\.yaml|scripts/(bus_audit|demo_runner|validation/validate_golden_chain_integrity)\.py|tests/validate_event_integration\.py|tests/(integration|unit)/skills/aislop_sweep/fixtures/.*)$'
       - id: no-bare-feature-flags
         stages: [pre-commit]
       - id: no-untracked-todos
@@ -73,6 +73,32 @@ repos:
       # STAGE 1: PRE-COMMIT (fast, target <15 seconds)
       # ============================================================
 
+      # OMN-9730: DGM-Phase4 — mechanical block on skip-deploy-gate bypass tokens.
+      # Rejects any staged file containing [skip-deploy-gate:] without an explicit
+      # approval receipt (# skip-token-allowed: <receipt-id>).
+      # CLAUDE.md Rule #10: never bypass local gates. Fix the underlying issue.
+      - id: reject-deploy-gate-skip-token
+        name: Reject skip-deploy-gate bypass tokens (OMN-9730)
+        entry: .pre-commit-hooks/reject-deploy-gate-skip-token.sh
+        language: script
+        pass_filenames: true
+        always_run: true
+        stages: [pre-commit]
+        exclude: '^tests/hooks/fixtures/'
+      - id: reject-deploy-gate-skip-token-commit-msg
+        name: Reject skip-deploy-gate bypass tokens in commit messages (OMN-9730)
+        entry: .pre-commit-hooks/reject-deploy-gate-skip-token.sh
+        language: script
+        pass_filenames: true
+        stages: [commit-msg]
+      - id: reject-legacy-session-id-reads
+        name: Reject legacy session-id env-var reads
+        entry: .pre-commit-hooks/reject-legacy-session-id-reads.sh
+        language: script
+        types_or: [python, shell]
+        pass_filenames: true
+        stages: [pre-commit]
+
       # TODO: Simplify back to `uv run python -m omnibase_core.validation.validator_local_paths`
       # once validator_local_paths is included in a released omnibase_core package.
       # The module exists in omnibase_core source (PR #530) but is not yet on PyPI.
@@ -84,6 +110,88 @@ repos:
         types: [text]
         exclude: '\.secrets\.baseline$|^docs/.*|^tests/fixtures/.*|^tests/.*/fixtures/.*'
         pass_filenames: true
+        stages: [pre-commit]
+
+      # OMN-9039: block cross-repo @main refs in self-gating workflows to
+      # prevent the 2026-04-17 chicken-egg CI wedge (retro §4.8).
+      # Complement to OMN-9038 (PreToolUse API-time guard).
+      - id: check-self-gating-workflows
+        name: check for cross-repo @main refs in self-gating workflows
+        entry: python3 scripts/check_self_gating_workflows.py
+        language: system
+        files: '^\.github/workflows/.*\.ya?ml$'
+        pass_filenames: true
+        stages: [pre-commit]
+
+      # OMN-8776: regression guard — skill prompts must not hardcode
+      # `mcp__linear-server__*` tool names. Ticketing operations route
+      # through ProtocolProjectTracker (`uv run onex run node_*`).
+      - id: lint-skill-mcp-refs
+        name: reject mcp__linear-server__ refs in skill prompts
+        entry: python3 scripts/lint_skill_mcp_refs.py
+        language: system
+        files: '^plugins/onex/skills/.*\.md$'
+        pass_filenames: true
+        stages: [pre-commit]
+
+      # OMN-9072: regression guard — every hookSpecificOutput emission must
+      # include hookEventName, else Claude Code silently drops the payload.
+      - id: check-hook-event-names
+        name: check hook scripts include hookEventName in hookSpecificOutput
+        entry: bash scripts/check_hook_event_names.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      # OMN-10604: block direct adapter imports in runners/skills —
+      # adapters must be injected via DI, not constructed inline.
+      - id: no-direct-adapter-in-business-logic
+        name: reject direct adapter imports in business logic
+        entry: python3 scripts/validation/validate_no_direct_adapter_in_business_logic.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      # OMN-10658 / OMN-10734: block localhost/default fallbacks in src/ and scripts/
+      # Enforces fail-fast env var access: os.environ["VAR"] not os.getenv("VAR", "localhost...")
+      - id: no-env-fallbacks
+        name: No localhost/default env fallbacks (OMN-10658)
+        entry: python3 scripts/validate_no_env_fallbacks.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      # OMN-10723: block silent inprocess fallback patterns in skill code.
+      # Skills must dispatch through the event bus, not bypass it.
+      - id: no-inprocess-fallback-in-skills
+        name: No silent inprocess fallback in skills (OMN-10723)
+        entry: bash plugins/onex/hooks/scripts/pre-commit-no-inprocess-fallback.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      # OMN-10725: block direct EventBus instantiation outside DI bootstrap —
+      # handlers/skills/runners must receive bus via DI or select_event_bus().
+      - id: no-direct-bus-instantiation
+        name: No direct EventBus instantiation (must use DI/select_event_bus)
+        entry: python3 scripts/validation/validate_no_direct_bus_instantiation.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      # OMN-10725: block raw sqlite3.connect() outside adapter definitions —
+      # DB access must go through injected adapter, not direct connection.
+      - id: no-raw-sqlite3-in-handlers
+        name: No raw sqlite3.connect in handler/skill code (must use adapter)
+        entry: python3 scripts/validation/validate_no_raw_sqlite3.py
+        language: system
+        pass_filenames: false
+        always_run: true
         stages: [pre-commit]
 
       - id: clean-output-directory
@@ -393,6 +501,30 @@ repos:
         stages: [pre-commit]
         files: ^plugins/onex/skills/
 
+      # Skill backing-node liveness (OMN-10052) — blocks skill→node regressions.
+      # Fires when SKILL.md files or the validator/allowlist change.
+      # Set $OMNIMARKET_ROOT to the omnimarket repo root for local dev;
+      # CI checks out omnimarket into _omnimarket/ automatically.
+      - id: validate-skill-backing-node
+        name: Skill backing-node liveness (OMN-10052)
+        entry: bash scripts/uv-run-worktree-safe.sh python plugins/onex/skills/_lib/validate_skill_backing_node.py .
+        language: system
+        pass_filenames: false
+        always_run: false
+        stages: [pre-commit]
+        files: ^(plugins/onex/skills/.*/SKILL\.md|plugins/onex/skills/_lib/validate_skill_backing_node\.py|plugins/onex/skills/_lib/skill_backing_node_allowlist\.yaml)$
+
+      # Skill aspiration validation (OMN-9075) — blocks SKILL.md claims without
+      # backing-node behavior for deterministic receipt/artifact/event claims.
+      - id: validate-skill-aspiration
+        name: Skill aspiration validation (OMN-9075)
+        entry: bash scripts/uv-run-worktree-safe.sh python scripts/validation/validate_skill_aspiration.py
+        language: system
+        pass_filenames: false
+        always_run: false
+        stages: [pre-commit]
+        files: ^(plugins/onex/skills/.*/SKILL\.md|plugins/onex/skills/_lib/validate_skill_aspiration\.py|scripts/(extract_skill_claims|validation/validate_skill_aspiration)\.py)$
+
       # Skill hygiene (OMN-5200) — validates skill dir naming, structure, Python separation
       - id: skill-hygiene
         name: Skill Hygiene
@@ -407,6 +539,23 @@ repos:
         name: Skill Contract Validation
         language: system
         entry: bash scripts/validate_skill_contracts_wrapper.sh
+        pass_filenames: false
+        stages: [pre-commit]
+        files: ^plugins/onex/skills/
+      # Instructional-skill enforcement (OMN-8766, S19)
+      # Rejects partial-port of the deterministic dispatch contract into
+      # Tier 3 instructional (pure-prose) skills. Forbids:
+      #   - `onex run` / `onex run-node` dispatch commands
+      #   - `rendered_output` receipt assertions
+      # Dispatch belongs in Tier 1 (OMN-8749 / OMN-8765); rendered_output
+      # belongs in deterministic-skill DoD evidence contracts.
+      # Initial land: --report (non-blocking) because 3 pre-existing
+      # violations live in authorize (1) + onboarding (2). Flip to blocking
+      # once follow-up ticket clears them so "all 15 skills pass green".
+      - id: validate-instructional-skill-routing
+        name: ONEX Instructional Skill Enforcement (OMN-8766)
+        language: system
+        entry: bash scripts/uv-run-worktree-safe.sh python scripts/validation/validate_instructional_skill_routing.py --report
         pass_filenames: false
         stages: [pre-commit]
         files: ^plugins/onex/skills/
@@ -485,8 +634,25 @@ repos:
         types: [python]
         exclude: ^tests/|^examples/|^scripts/
 
+      - id: normalization-symmetry
+        name: normalization-symmetry
+        entry: uv run python -m omnibase_core.validation.checker_normalization_symmetry
+        language: system
+        pass_filenames: false
+
+      # Hook bitmask drift check (OMN-9615)
+      # Regenerates hook_bits.sh from EnumHookBit and fails if the committed
+      # artifact is stale. Fires when hook_bits.sh is modified.
+      - id: hook-bits-drift
+        name: hook_bits.sh drift check (regenerate if EnumHookBit changes)
+        entry: uv --directory ../omnibase_core run python scripts/gen_hook_bits.py --check ../omniclaude/plugins/onex/hooks/lib/hook_bits.sh
+        language: system
+        pass_filenames: false
+        files: ^plugins/onex/hooks/lib/hook_bits\.sh$
+        stages: [pre-commit]
+
 # Configuration
-default_install_hook_types: [pre-commit, pre-push]
+default_install_hook_types: [pre-commit, pre-push, commit-msg]
 default_stages: [pre-commit]
 fail_fast: false
 

@@ -14,6 +14,133 @@ Then paste the printed one-liner into the Claude Code session. The automated pat
 
 ---
 
+## Emergency: disable omniclaude hooks (kill-switch) [OMN-9140]
+
+If the DELEGATION ENFORCER (or any omniclaude hook) recursively blocks a
+session, disable it immediately — no plugin uninstall, no restart required:
+
+```bash
+# Option 1 — export for the current shell / Claude Code session:
+export OMNICLAUDE_HOOKS_DISABLE=1
+
+# Option 2 — persistent file marker (clears on delete):
+touch ~/.claude/omniclaude-hooks-disabled
+
+# To re-enable:
+unset OMNICLAUDE_HOOKS_DISABLE
+rm -f ~/.claude/omniclaude-hooks-disabled
+```
+
+Both the shell hook scripts (`post-tool-delegation-counter.sh`,
+`post-skill-delegation-enforcer.sh`) and the hook runtime daemon
+(`src/omniclaude/hook_runtime/server.py`) short-circuit `pass` on either
+signal BEFORE any threshold logic runs. The sub-agent exemption
+(`subagent-start.sh` writes a per-session marker under
+`$ONEX_STATE_DIR/hooks/subagent-sessions/`) protects Task()-spawned sub-agents
+independently — they never hit thresholds.
+
+---
+
+## Per-hook gating: ONEX_HOOKS_MASK [OMN-9612]
+
+> **Rollout status:** The bitmask gate is being wired into hook wrappers by
+> OMN-9617 (Task 5 of the hook-bitmask plan). Until that ticket lands,
+> `ONEX_HOOKS_MASK` has no effect on hooks that have not yet been retrofitted.
+> The infrastructure (enum, CLI, shell library) is being built out in the
+> OMN-9609 epic wave.
+
+Once fully rolled out (post OMN-9617), every omniclaude hook wrapper will
+read `ONEX_HOOKS_MASK` and exit silently (exit 0, no side effect) when its
+bit is cleared. Default is `(1 << N) - 1` where `N = len(EnumHookBit)` —
+i.e. all bits on, width-matched to the enum, current behavior preserved.
+The bit positions are defined by `EnumHookBit` in
+`omnibase_core/src/omnibase_core/enums/enum_hook_bit.py`.
+
+**Important:** when `ONEX_HOOKS_MASK` is absent or unset, the default is
+recomputed from the current enum width — all new hooks are on by default.
+However, once a hex literal is saved to `~/.omnibase/.env`, it is fixed.
+If you add new hooks after saving a mask, run `onex hooks enable <NEW_NAME>`
+or delete the `ONEX_HOOKS_MASK` line from `.env` to restore all-on default.
+
+Set the mask in `~/.omnibase/.env` or export it for the current shell:
+
+```bash
+# Persistent (survives shell restart):
+onex hooks disable CI_REMINDER    # writes ONEX_HOOKS_MASK=0x... to ~/.omnibase/.env
+
+# Session-only:
+export ONEX_HOOKS_MASK=0x...      # overrides .env for current shell only
+```
+
+### `onex hooks` CLI surface
+
+```text
+onex hooks list              # every hook and its current on/off state
+onex hooks mask              # current mask value (default: hex)
+onex hooks mask --format dec # decimal form
+onex hooks mask --format bin # binary form
+onex hooks disable CI_REMINDER
+onex hooks enable  CI_REMINDER
+```
+
+The CLI reads `~/.omnibase/.env` (or the env var `OMNIBASE_ENV_FILE` if set)
+and writes `ONEX_HOOKS_MASK=0x<value>` in-place. New shells pick up the
+updated value on session start via the standard `.env` source.
+
+Note: the `onex hooks` CLI is implemented by OMN-9614 and may not be
+available until that ticket lands. If absent, set `ONEX_HOOKS_MASK`
+manually using the hex literal reported by
+`python3 -c 'from omnibase_core.enums.enum_hook_bit import EnumHookBit; print(hex((1 << len(EnumHookBit)) - 1))'`.
+
+### Relationship to the global kill-switch
+
+`OMNICLAUDE_HOOKS_DISABLE=1` (see "Emergency: disable omniclaude hooks"
+above) short-circuits **every** hook before any bitmask logic runs. Use
+`ONEX_HOOKS_MASK` for targeted, per-hook disablement; use the kill-switch
+for emergency full-off of all hooks.
+
+```text
+OMNICLAUDE_HOOKS_DISABLE=1      ← global kill-switch (highest priority, all hooks off)
+        ↓ (only reached when kill-switch is unset)
+ONEX_HOOKS_MASK bit cleared     ← per-hook disable (bitmask gate)
+        ↓ (only reached when bit is set)
+hook logic runs
+```
+
+### Append-only bit governance
+
+Bit positions are **append-only forever**. The authoritative mapping of hook
+name → bit ordinal lives in:
+
+```text
+omniclaude/docs/hook-bit-inventory.md     ← OMN-9610 output; canonical source
+omnibase_core/src/omnibase_core/enums/enum_hook_bit.py
+```
+
+Never insert a new bit mid-enum. Removed hooks keep tombstone entries;
+renamed hooks append a new bit. See plan
+`omni_home/docs/plans/2026-04-24-hook-bitmask-enum.md` § "Bit Governance
+Rules" and § "Migration and Long-Term Semantics Truth Boundary" for the
+full policy.
+
+### Migration note
+
+**Current state (pre-OMN-9617):** The legacy `OMNICLAUDE_HOOK_<NAME>=0/1`
+per-hook env vars are still active and work as before. Hook scripts such as
+`plugins/onex/hooks/post-tool-use-ruff.sh` and
+`plugins/onex/hooks/scripts/post-tool-use-test-reminder.sh` still branch on
+these variables. If you have scripts or `.env` entries that use them, they
+continue to work.
+
+**After OMN-9617 lands (Task 5 behavioral cutover):** The legacy per-hook
+env vars will be physically removed from every GATE hook wrapper and
+superseded by `ONEX_HOOKS_MASK`. At that point, any reference to
+`OMNICLAUDE_HOOK_<NAME>` in shells or scripts becomes a **no-op**. Migrate
+to `onex hooks disable <NAME>` before or immediately after OMN-9617 merges.
+Do not add new per-hook env vars of the legacy form.
+
+---
+
 ## Skill Usage Policy
 
 - Before any task, check if a matching skill exists. If it does, use it.
@@ -25,7 +152,7 @@ Then paste the printed one-liner into the Claude Code session. The automated pat
 ## Workflow Dispatch Rules
 
 - When executing plans or tasks, ALWAYS use the correct skill/workflow (hostile-reviewer, design-to-plan, epic-team, merge-sweep, ticket-pipeline) rather than ad-hoc implementation. Never replicate a skill's logic inline — dispatch to the skill.
-- When dispatching work to sub-agents or polymorphic agents, verify: (1) correct handoff file is referenced, (2) parent epic is set on tickets, (3) agent uses polymorphic dispatch. Do not blindly dispatch without understanding the situation first.
+- When dispatching work to sub-agents or general-purpose agents, verify: (1) correct handoff file is referenced, (2) parent epic is set on tickets, (3) agent uses polymorphic dispatch. Do not blindly dispatch without understanding the situation first.
 - When working with Linear tickets in bulk, use rate-limit-aware batching (max 5-10 per batch with delays). Always set parent epic when creating tickets in bulk.
 
 ---
@@ -67,6 +194,7 @@ Then paste the printed one-liner into the Claude Code session. The automated pat
 
 | This repo owns | Another repo owns |
 |----------------|-------------------|
+| **Repo Charter** | See [`docs/architecture/charter.md`](docs/architecture/charter.md) for full scope boundary declaration |
 | Claude Code hooks (SessionStart, UserPromptSubmit, PostToolUse, SessionEnd) | **omniintelligence** -- intelligence processing, code analysis |
 | Agent YAML definitions (`plugins/onex/agents/configs/`) | **omniintelligence** -- intelligence processing, code analysis |
 | Slash commands and skills (`plugins/onex/commands/`, `plugins/onex/skills/`) | **omnibase_core** -- ONEX runtime, node framework, contracts |
@@ -129,7 +257,7 @@ What happens when infrastructure is unavailable:
 | **Emit daemon down** | Events dropped, hook continues | 0 | Yes (events) |
 | **Kafka unavailable** | Daemon buffers briefly, then drops | 0 | Yes (events) |
 | **PostgreSQL down** | Logging skipped if `ENABLE_POSTGRES=true` | 0 | Yes (logs) |
-| **Routing timeout (5s)** | Fallback to default agent | 0 | No |
+| **Routing timeout (5s)** | Returns no match (fail-fast, no fallback) | 0 | No |
 | **Malformed stdin JSON** | Hook logs error, passes through empty | 0 | No |
 | **Agent YAML not found** | Uses default agent, logs warning | 0 | No |
 | **Context injection fails** | Proceeds without patterns | 0 | No |
@@ -229,6 +357,17 @@ Gate names are API-stable. Do not rename without following the Branch Protection
 - Prefer auto-merge over immediate merge when multiple PRs target the same branch.
 - When modifying branch protection rules, never remove them after adding them.
   If temporary rules were needed, flag them to the user rather than auto-removing.
+
+### Standalone Lint Gates
+
+Required status checks outside `ci.yml`:
+
+| Workflow | Gate | What it rejects |
+|----------|------|-----------------|
+| `hook-log-path-lint.yml` | Hook Log Path Lint | Hook scripts deriving state paths from `PLUGIN_ROOT`/`HOOKS_DIR`/`SCRIPT_DIR` (OMN-8429). |
+| `skill-mcp-ref-lint.yml` | Skill MCP Reference Lint | Hardcoded `mcp__linear-server__*` tool names in `plugins/onex/skills/**/*.md` (OMN-8776). Skills must route ticketing through `ProtocolProjectTracker` / `uv run onex run node_*`. |
+
+Both gates also run as pre-commit hooks and must exit non-zero on violation.
 
 ---
 
@@ -441,7 +580,7 @@ ls -la plugins/onex/hooks/scripts/*.sh                              # Check scri
 |---------|-------------|-----|
 | Events not emitting | Daemon not started | SessionStart hook must run first to start the daemon |
 | Hook fails with exit 1 | Wrong Python interpreter | Check `find_python()` logic; set `PLUGIN_PYTHON_BIN` |
-| Routing returns `polymorphic-agent` for everything | Routing service timeout | Check network connectivity to routing service (5s timeout) |
+| Routing returns no match | Routing service timeout | Check network connectivity to routing service (5s timeout) |
 | Context injection empty | Database unreachable | Check `POSTGRES_HOST`/`POSTGRES_PORT` in `.env`; injection has 1s timeout |
 
 ---
@@ -721,15 +860,20 @@ uv sync --group dev  # Include dev tools
 The onex plugin is installed via Claude Code's marketplace system:
 
 ```bash
-# Install (or reinstall after cache wipe)
+# 1. Pull latest in the canonical clone (marketplace reads from it)
+git -C "$OMNI_HOME/omniclaude" pull --ff-only
+
+# 2. Refresh the marketplace index
+claude plugin marketplace update omninode-tools
+
+# 3. Force a fresh copy: uninstall then reinstall
+claude plugin uninstall onex@omninode-tools
 claude plugin install onex@omninode-tools
 
-# Uninstall
-claude plugin uninstall onex@omninode-tools
+# 4. Restart the Claude Code session to pick up hooks/skills
 ```
 
 The marketplace config lives at `plugins/.claude-plugin/marketplace.json`.
-`deploy_local_plugin` is retired — use the marketplace install command.
 
 ---
 

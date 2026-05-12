@@ -5,21 +5,21 @@ name: Check Architecture Handshake
 on:
   push:
     branches: [main, develop]
-    paths:
-      - '.claude/architecture-handshake.md'
-      - '.github/workflows/check-handshake.yml'
   pull_request:
     branches: [main, develop]
-    paths:
-      - '.claude/architecture-handshake.md'
-      - '.github/workflows/check-handshake.yml'
   merge_group:
   workflow_dispatch:
 
 jobs:
   check-handshake:
     name: Check architecture handshake
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name != github.repository)
+        && fromJSON(vars.OMNI_PUBLIC_PR_RUNS_ON_JSON || '["ubuntu-latest"]')
+        || fromJSON(vars.OMNI_TRUSTED_CI_RUNS_ON_JSON || '["self-hosted","omnibase-ci"]')
+      }}
     timeout-minutes: 5
 
     steps:
@@ -36,6 +36,7 @@ jobs:
           path: omnibase_core
 
       - name: Verify omnibase_core checkout
+        working-directory: ${{ github.workspace }}
         run: |
           if [ ! -f omnibase_core/architecture-handshakes/check-handshake.sh ]; then
             echo "::error::Failed to checkout omnibase_core or check-handshake.sh not found."
@@ -43,4 +44,5 @@ jobs:
           fi
 
       - name: Check architecture handshake
+        working-directory: ${{ github.workspace }}
         run: bash omnibase_core/architecture-handshakes/check-handshake.sh

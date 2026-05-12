@@ -14,7 +14,8 @@ Flow:
         -> else: TriggerMatcher.match() -> ConfidenceScorer.score()
         -> sort by confidence, take top results
         -> return ModelRoutingResult(routing_policy="trigger_match")
-        -> if no matches: return fallback ModelRoutingResult(routing_policy="fallback_default")
+        -> if no matches above threshold: fall back to FALLBACK_AGENT
+           (ModelRoutingResult(routing_policy="fallback_default"))
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 # Default fallback agent when no matches exceed threshold
-FALLBACK_AGENT = "polymorphic-agent"
+FALLBACK_AGENT = "general-purpose"
 
 # Maximum number of candidates to include in result
 _MAX_CANDIDATES = 5
@@ -297,7 +298,7 @@ def extract_explicit_agent(text: str, known_agents: set[str]) -> str | None:
     - "use agent-X" - Specific agent request
     - "@agent-X" - Specific agent request
     - "agent-X" at start of text - Specific agent request
-    - "use an agent", "spawn an agent", etc. - Generic request -> polymorphic-agent
+    - "use an agent", "spawn an agent", etc. - Generic request -> general-purpose
 
     Args:
         text: User's input text.
@@ -332,35 +333,27 @@ def extract_explicit_agent(text: str, known_agents: set[str]) -> str | None:
                     return agent_name
 
         # Patterns for generic agent requests (no specific agent name)
-        # These should default to polymorphic-agent
-        # Word boundaries (\b) prevent false positives like "misuse an agent"
+        # These should default to general-purpose.
+        # Word boundaries (\b) prevent false positives like "misuse an agent".
         generic_patterns = [
             r"\buse\s+an?\s+agent\b",  # "use an agent" or "use a agent"
             r"\bspawn\s+an?\s+agent\b",  # "spawn an agent" or "spawn a agent"
-            r"\bspawn\s+an?\s+poly\b",  # "spawn a poly" or "spawn an poly"
             r"\bdispatch\s+to\s+an?\s+agent\b",  # "dispatch to an agent"
             r"\bcall\s+an?\s+agent\b",  # "call an agent" or "call a agent"
             r"\binvoke\s+an?\s+agent\b",  # "invoke an agent" or "invoke a agent"
         ]
 
-        # Check generic patterns
         for pattern in generic_patterns:
-            match = re.search(pattern, text_lower)
-            if match:
-                # Default to polymorphic-agent
-                default_agent = FALLBACK_AGENT
-                # Verify polymorphic-agent exists in registry
-                if default_agent in known_agents:
+            if re.search(pattern, text_lower):
+                if FALLBACK_AGENT in known_agents:
                     logger.debug(
-                        "Generic agent request matched, using default: %s",
-                        default_agent,
+                        "Generic agent request -> %s (pattern=%s)",
+                        FALLBACK_AGENT,
+                        pattern,
                     )
-                    return default_agent
-                else:
-                    logger.warning(
-                        "Generic agent request matched but %s not in registry",
-                        default_agent,
-                    )
+                    return FALLBACK_AGENT
+                # Fallback agent not present in registry — no explicit match.
+                return None
 
         return None
 

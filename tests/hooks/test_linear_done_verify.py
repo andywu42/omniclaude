@@ -17,8 +17,10 @@ import importlib.util
 import json
 import subprocess
 import sys
+import urllib.error
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -41,6 +43,8 @@ PRRef = linear_done_verify.PRRef
 PRStatus = linear_done_verify.PRStatus
 parse_pr_refs = linear_done_verify.parse_pr_refs
 verify = linear_done_verify.verify
+is_done_state = linear_done_verify.is_done_state
+is_cancel_state = linear_done_verify.is_cancel_state
 
 
 def _merged(ref: PRRef) -> PRStatus:
@@ -345,3 +349,263 @@ def test_open_with_blocking_merge_state_rejected(merge_state: str) -> None:
         merge_state=merge_state,
     )
     assert linear_done_verify.classify_blocking(status) is True
+
+
+class TestFetchLinearIssue:
+    def test_returns_empty_dict_when_api_key_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("LINEAR_API_KEY", raising=False)
+        result = linear_done_verify._fetch_linear_issue("OMN-9454")
+        assert result == {}
+
+    def test_returns_issue_dict_on_success(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LINEAR_API_KEY", "lin_api_test")
+        response_body = json.dumps(
+            {
+                "data": {
+                    "issue": {
+                        "id": "OMN-9454",
+                        "title": "Fix linear-cli",
+                        "description": "Fixed in #202",
+                        "state": {"name": "Done"},
+                        "labels": {"nodes": [{"name": "close-if-done"}]},
+                    }
+                }
+            }
+        ).encode()
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = response_body
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = linear_done_verify._fetch_linear_issue("OMN-9454")
+
+        assert result is not None
+        assert result["id"] == "OMN-9454"
+        assert result["description"] == "Fixed in #202"
+        assert result["labels"] == ["close-if-done"]
+
+    def test_returns_none_on_network_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LINEAR_API_KEY", "lin_api_test")
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.URLError("connection refused"),
+        ):
+            result = linear_done_verify._fetch_linear_issue("OMN-9454")
+        assert result is None
+
+
+class TestMainFailOpenOnMissingKey:
+    def test_main_allows_when_api_key_missing_and_no_description(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Missing LINEAR_API_KEY → fail-open; hook must not block the user."""
+        monkeypatch.delenv("LINEAR_API_KEY", raising=False)
+        monkeypatch.setattr(
+            linear_done_verify,
+            "_load_stdin_tool_call",
+            lambda: {
+                "tool_name": "mcp__linear-server__save_issue",
+                "tool_input": {"id": "OMN-9999", "state": "Done"},
+            },
+        )
+        rc = linear_done_verify.main()
+        assert rc == 0
+
+
+class TestCancelBucketBypass:
+    """Regression tests for OMN-10047 — cancel/duplicate transitions must
+    bypass PR verification entirely, since the work is explicitly NOT being
+    shipped. Without this carve-out, tickets whose descriptions contain
+    `PR #N` strings inside markdown code blocks get blocked on Cancel."""
+
+    @pytest.mark.parametrize(
+        "state_value",
+        ["Cancelled", "Canceled", "cancelled", "Duplicate", "duplicate", "Won't do"],
+    )
+    def test_is_cancel_state_recognizes_cancel_bucket(self, state_value: str) -> None:
+        assert is_cancel_state(state_value) is True
+        # Cancel-bucket states must NOT be classified as "done"
+        # (otherwise the merge-PR check would still run).
+        assert is_done_state(state_value) is False
+
+    @pytest.mark.parametrize(
+        "state_value",
+        ["Done", "Complete", "Completed", "Closed"],
+    )
+    def test_is_done_state_still_requires_merge_proof(self, state_value: str) -> None:
+        assert is_done_state(state_value) is True
+        assert is_cancel_state(state_value) is False
+
+    def test_cancel_with_pr_n_in_code_block_is_allowed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OMN-10047 reproducer: cancelling a ticket whose description has
+        `PR #8` text inside a markdown code block must succeed. Previously
+        the regex misfired and reported `PR #8 has no associated repo`,
+        blocking the Cancel transition."""
+        description = (
+            "Orphan ticket from ghost-epic tree. No real PRs exist.\n\n"
+            "```\n"
+            "Task 8 — wire up handler\n"
+            "PR #8 reference inside fenced code\n"
+            "```\n"
+        )
+        monkeypatch.setattr(
+            linear_done_verify,
+            "_load_stdin_tool_call",
+            lambda: {
+                "tool_name": "mcp__linear-server__save_issue",
+                "tool_input": {
+                    "id": "OMN-9817",
+                    "state": "Cancelled",
+                    "description": description,
+                },
+            },
+        )
+        # Make _fetch_linear_issue explode if anyone calls it — proves we
+        # short-circuit before any network / verification logic runs.
+        monkeypatch.setattr(
+            linear_done_verify,
+            "_fetch_linear_issue",
+            lambda _id: (_ for _ in ()).throw(
+                AssertionError("must not fetch on Cancel")
+            ),
+        )
+        rc = linear_done_verify.main()
+        assert rc == 0
+
+    def test_cancel_without_description_is_allowed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A status-only Cancel with no description should not even attempt
+        a Linear fetch (cancel bucket bypasses verification entirely)."""
+        monkeypatch.setattr(
+            linear_done_verify,
+            "_load_stdin_tool_call",
+            lambda: {
+                "tool_name": "mcp__linear-server__save_issue",
+                "tool_input": {"id": "OMN-9821", "state": "Cancelled"},
+            },
+        )
+        monkeypatch.setattr(
+            linear_done_verify,
+            "_fetch_linear_issue",
+            lambda _id: (_ for _ in ()).throw(
+                AssertionError("must not fetch on Cancel")
+            ),
+        )
+        rc = linear_done_verify.main()
+        assert rc == 0
+
+    def test_duplicate_state_is_allowed_without_pr_check(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`Duplicate` is the workaround used in the OMN-10047 cleanup;
+        verify it still bypasses PR verification post-fix."""
+        monkeypatch.setattr(
+            linear_done_verify,
+            "_load_stdin_tool_call",
+            lambda: {
+                "tool_name": "mcp__linear-server__save_issue",
+                "tool_input": {
+                    "id": "OMN-9817",
+                    "state": "Duplicate",
+                    "description": "Fixed in #999 maybe",  # would block on Done
+                },
+            },
+        )
+        rc = linear_done_verify.main()
+        assert rc == 0
+
+    def test_done_with_unmerged_pr_still_blocks(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Sanity check: the PR verification path must still fire for true
+        Done transitions. This test prevents the OMN-10047 fix from
+        weakening OMN-8415's original guarantee."""
+        monkeypatch.setattr(
+            linear_done_verify,
+            "_load_stdin_tool_call",
+            lambda: {
+                "tool_name": "mcp__linear-server__save_issue",
+                "tool_input": {
+                    "id": "OMN-9817",
+                    "state": "Done",
+                    "description": "Done. Fixed in #202.",
+                },
+            },
+        )
+        assert is_cancel_state("Done") is False
+        assert is_done_state("Done") is True
+
+        verify_calls: list[tuple[str, list[str] | None, str | None]] = []
+
+        def verify_with_blocked_pr(
+            description: str,
+            labels: list[str] | None,
+            default_repo: str | None = None,
+        ) -> linear_done_verify.VerificationResult:
+            verify_calls.append((description, labels, default_repo))
+            return verify(
+                description,
+                labels,
+                default_repo="OmniNode-ai/omniclaude",
+                fetcher=_blocked,
+            )
+
+        monkeypatch.setattr(linear_done_verify, "verify", verify_with_blocked_pr)
+
+        rc = linear_done_verify.main()
+        captured = capsys.readouterr()
+
+        assert rc == 2
+        assert verify_calls == [("Done. Fixed in #202.", [], None)]
+        assert "Cannot mark Done" in captured.err
+        assert "#202: state=OPEN mergeState=BLOCKED" in captured.err
+
+
+class TestShellWrapperCancel:
+    """End-to-end shell wrapper coverage for OMN-10047."""
+
+    def test_shell_allows_cancel_with_pr_n_text(self) -> None:
+        result = _run_hook(
+            {
+                "tool_name": "mcp__linear-server__save_issue",
+                "tool_input": {
+                    "id": "OMN-9817",
+                    "state": "Cancelled",
+                    "description": (
+                        "Orphan ticket. Description mentions PR #8 in a "
+                        "code block but no real PR exists."
+                    ),
+                },
+            }
+        )
+        assert result.returncode == 0, (
+            f"Cancel transition unexpectedly blocked. "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+
+    def test_shell_allows_duplicate_state(self) -> None:
+        result = _run_hook(
+            {
+                "tool_name": "mcp__linear-server__save_issue",
+                "tool_input": {
+                    "id": "OMN-9821",
+                    "state": "Duplicate",
+                    "description": "Refers to #202 informally.",
+                },
+            }
+        )
+        assert result.returncode == 0

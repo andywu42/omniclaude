@@ -25,8 +25,8 @@ args:
     description: "Minimum severity to post a thread: CRITICAL, MAJOR, MINOR (default: MAJOR)"
     required: false
   - name: --reviewer-models
-    description: "Comma-separated reviewer model list (default: qwen3-coder-30b,qwen3-14b)"
-    required: false
+    description: "Comma-separated reviewer model list. Required — caller must pass model keys registered in ModelInferenceBridgeConfig.model_configs (e.g. LLM_CODER_URL-backed key). Prior hardcoded defaults produced a silent-clean verdict when the keys weren't in the registry (OMN-9112)."
+    required: true
   - name: --judge-model
     description: "Judge model identifier (default: deepseek-r1)"
     required: false
@@ -37,11 +37,14 @@ args:
 
 # PR Review Bot
 
-Thin skill wrapper over `node_pr_review_bot.workflow_runner.run_review()` in omnimarket.
+> **[OMN-10111] DISABLED:** hostile_reviewer / pr_review_bot adversarial review is currently disabled pending eval framework validation. Do NOT invoke this skill. Re-enable when OMN-10111 closes (eval precision/recall thresholds met).
+
+Thin skill wrapper over the manifest-canonical `onex run-node node_pr_review_bot`
+runtime path.
 
 Runs the full PR review bot FSM pipeline:
 1. Fetch PR diff hunks via HandlerDiffFetcher
-2. Run multi-model adversarial review (qwen3-coder-30b + qwen3-14b by default)
+2. Run multi-model adversarial review (models must be registered in ModelInferenceBridgeConfig; caller passes keys)
 3. Post findings as GitHub PR review threads via HandlerThreadPoster
 4. Watch threads for developer responses via HandlerThreadWatcher
 5. Verify resolutions via HandlerJudgeVerifier (deepseek-r1 by default)
@@ -52,11 +55,15 @@ Runs the full PR review bot FSM pipeline:
 ## Quick Start
 
 ```
-/pr_review_bot 42
-/pr_review_bot 42 OmniNode-ai/omnimarket
-/pr_review_bot 42 --dry-run
-/pr_review_bot 42 --severity-threshold CRITICAL
+/pr_review_bot 42 --reviewer-models qwen3-coder
+/pr_review_bot 42 OmniNode-ai/omnimarket --reviewer-models qwen3-coder
+/pr_review_bot 42 --dry-run --reviewer-models qwen3-coder
+/pr_review_bot 42 --severity-threshold CRITICAL --reviewer-models qwen3-coder
 ```
+
+(`qwen3-coder` above is illustrative; substitute any key registered in
+`ModelInferenceBridgeConfig.model_configs` for your deployment. Unknown keys
+now raise `ValueError` per OMN-9112 fail-loud policy.)
 
 ## Execution
 
@@ -67,7 +74,7 @@ Parse args:
 - `repo` (optional): `owner/repo` string. If omitted, resolve from `gh repo view --json nameWithOwner -q .nameWithOwner` in the current working directory.
 - `--dry-run`: boolean flag, default false
 - `--severity-threshold`: one of `CRITICAL`, `MAJOR`, `MINOR` (default `MAJOR`)
-- `--reviewer-models`: comma-separated string (default `qwen3-coder-30b,qwen3-14b`)
+- `--reviewer-models`: comma-separated string (REQUIRED — must be keys registered in `ModelInferenceBridgeConfig.model_configs`; unknown keys now raise ValueError instead of returning a silent clean verdict, per OMN-9112)
 - `--judge-model`: string (default `deepseek-r1`)
 - `--max-findings`: integer (default `20`)
 
@@ -80,52 +87,42 @@ if [ -z "${GITHUB_TOKEN}" ]; then
 fi
 ```
 
-### Step 3 — Invoke WorkflowRunner
+### Step 3 — Invoke Runtime Node
 
 ```bash
-OMNIMARKET_ROOT="${OMNIMARKET_ROOT:-$(python3 -c 'import importlib.util; s=importlib.util.find_spec("omnimarket"); print(s.submodule_search_locations[0].split("/src/")[0]) if s else exit(1)' 2>/dev/null)}"
+INPUT_JSON="$(python3 - <<'PYEOF'
+import json
+import os
+import sys
 
-cd "${OMNIMARKET_ROOT}" && uv run python - <<'PYEOF'
-import sys, os, json
+reviewer_models = [
+    model.strip()
+    for model in os.environ.get("_REVIEWER_MODELS", "").split(",")
+    if model.strip()
+]
+if not reviewer_models:
+    sys.stderr.write(
+        "ERROR: --reviewer-models is required. Pass model keys registered in "
+        "ModelInferenceBridgeConfig.model_configs.\n"
+    )
+    sys.exit(1)
 
-pr_number    = int(os.environ["_PR_NUMBER"])
-repo         = os.environ["_REPO"]
-dry_run      = os.environ.get("_DRY_RUN", "false").lower() == "true"
-sev_thresh   = os.environ.get("_SEVERITY_THRESHOLD", "MAJOR")
-rev_models_s = os.environ.get("_REVIEWER_MODELS", "qwen3-coder-30b,qwen3-14b")
-judge_model  = os.environ.get("_JUDGE_MODEL", "deepseek-r1")
-max_findings = int(os.environ.get("_MAX_FINDINGS", "20"))
-
-reviewer_models = [m.strip() for m in rev_models_s.split(",") if m.strip()]
-
-from omnimarket.nodes.node_pr_review_bot.models.models import EnumFindingSeverity
-from omnimarket.nodes.node_pr_review_bot.workflow_runner import run_review
-
-severity_threshold = EnumFindingSeverity[sev_thresh]
-
-result = run_review(
-    pr_number=pr_number,
-    repo=repo,
-    reviewer_models=reviewer_models,
-    judge_model=judge_model,
-    severity_threshold=severity_threshold,
-    dry_run=dry_run,
-    max_findings_per_pr=max_findings,
-)
-
-verdict = result.verdict
-out = {
-    "correlation_id": str(result.correlation_id),
-    "verdict": verdict.verdict,
-    "total_findings": verdict.total_findings,
-    "threads_verified_pass": verdict.threads_verified_pass,
-    "threads_verified_fail": verdict.threads_verified_fail,
-    "phases_completed": len(result.events),
-    "final_phase": str(result.final_state.current_phase),
-}
-print(json.dumps(out, indent=2))
+print(json.dumps({
+    "pr_number": int(os.environ["_PR_NUMBER"]),
+    "repo": os.environ["_REPO"],
+    "dry_run": os.environ.get("_DRY_RUN", "false").lower() == "true",
+    "severity_threshold": os.environ.get("_SEVERITY_THRESHOLD", "MAJOR"),
+    "reviewer_models": reviewer_models,
+    "judge_model": os.environ.get("_JUDGE_MODEL", "deepseek-r1"),
+    "max_findings_per_pr": int(os.environ.get("_MAX_FINDINGS", "20")),
+}))
 PYEOF
+)"
+
+uv run onex run-node node_pr_review_bot --input "${INPUT_JSON}"
 ```
+
+On non-zero exit, surface the `SkillRoutingError` JSON envelope directly; do not produce prose.
 
 Set env vars before invoking:
 
@@ -198,12 +195,12 @@ echo "${RESULT_JSON}" > "${ONEX_STATE_DIR}/skill-results/${CORRELATION_ID}/pr_re
 Resolve repo (gh repo view if omitted)
   |
   v
-WorkflowRunner.run_review(pr_number, repo, ...)
+Runtime command payload
   |
   v
   HandlerDiffFetcher     → fetch PR diff hunks from GitHub
   HandlerFsmPrReviewBot  → drive FSM pipeline:
-    → HandlerReviewer        (qwen3-coder-30b + qwen3-14b)
+    → HandlerReviewer        (caller-supplied --reviewer-models; keys resolved via ModelInferenceBridgeConfig.model_configs)
     → HandlerThreadPoster    (post GitHub review threads)
     → HandlerThreadWatcher   (watch for developer responses)
     → HandlerJudgeVerifier   (deepseek-r1 judge)
@@ -224,9 +221,9 @@ Render summary + write artifact
 
 ## Node Reference
 
-- **WorkflowRunner**: `omnimarket/src/omnimarket/nodes/node_pr_review_bot/workflow_runner.py`
-- **FSM handler**: `omnimarket/src/omnimarket/nodes/node_pr_review_bot/handlers/handler_fsm.py`
-- **Contract**: `omnimarket/src/omnimarket/nodes/node_pr_review_bot/contract.yaml`
+- **Runtime target**: `onex run-node node_pr_review_bot`
+- **FSM handler**: `HandlerFsmPrReviewBot`
+- **Contract**: `node_pr_review_bot`
 - **Ticket**: OMN-7976
 
 ## Stub Handlers (current state)

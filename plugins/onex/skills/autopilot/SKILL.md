@@ -1,4 +1,7 @@
 ---
+user_invocable: false
+retired: true
+replacement_skill: session
 description: Autonomous close-out orchestrator — 4-phase pipeline with worktree health sweep, full merge-sweep with DIRTY PR triage and queue stall detection, infra health gate, quality sweeps (dod-sweep with per-ticket verification, aislop-sweep, bus-audit, gap detect), integration-sweep hard gate, Playwright regression gate, release, redeploy, and post-release verification (verify-plugin, dashboard-sweep, container health). Compounds — each cycle's merged infrastructure makes the next cycle's gate stricter.
 version: 3.0.0
 mode: full
@@ -13,6 +16,7 @@ tags:
   - release
   - deploy
   - org-wide
+  - retired
 author: OmniClaude Team
 composable: true
 args:
@@ -32,10 +36,9 @@ outputs:
     description: "Integration surface(s) that caused halt, or empty string on complete"
 ---
 
-> **DEPRECATED — Superseded by `/onex:session`** (OMN-8340).
+> **RETIRED — Superseded by `/onex:session`** (OMN-9428).
 > Phase A/B/C/D close-out logic becomes Phase 3 dispatch targets in `/onex:session`.
-> Use `/onex:session` for new session management. Existing cron invocations of `cron-closeout.sh`
-> remain valid until the cleanup ticket removes this skill.
+> Use `/onex:session` for session management.
 > Do not add new functionality here.
 
 # autopilot
@@ -75,8 +78,16 @@ fires within a single session, causing context accumulation that exhausts the co
 after 2-3 passes (9 recorded friction events). Headless `claude -p` eliminates this by design.
 
 **No poly dispatch.** Autopilot phases execute directly via `claude -p` with scoped tool
-allowlists. The polymorphic-agent indirection is unnecessary for headless invocations where
+allowlists. The general-purpose indirection is unnecessary for headless invocations where
 each phase has a fixed prompt and tool set.
+
+**No foreground `Agent()` dispatch (OMN-8602).** Autopilot phases must NEVER be dispatched
+via inline `Agent(subagent_type=...)` calls from a foreground interactive session. Inline
+dispatch blocks the foreground session and bypasses the headless orchestration layer that
+owns checkpoint-resume, lock files, and circuit-breaker accounting. The friction surface
+`close_out:tooling/foreground-agent-dispatch` was logged repeatedly when agents fell back
+to inline dispatch despite this rule. If a phase needs to spawn workers, it does so from
+*within* the headless `claude -p` invocation — not from the operator session.
 
 **Checkpoint-resume**: Each phase writes its result to `{run_dir}/{phase_name}.txt`. If a
 `claude -p` invocation is interrupted (rate limit, network drop, process kill), re-running
@@ -400,3 +411,13 @@ Each headless `claude -p` phase inherits authorization from `cron-closeout.sh`:
 - **close-day**: D4 — day audit artifact
 - **insights-to-plan**: D5 — opportunistic insights-to-plan auto-trigger (non-halting)
 - **ModelIntegrationRecord**: written by integration-sweep; read by autopilot to determine halt
+
+---
+
+## Routing Contract
+
+- **Classification**: Deterministic
+- **Backing node**: `node_autopilot_orchestrator`
+- **Dispatch**: `onex run-node node_autopilot_orchestrator`
+
+On non-zero exit, a `SkillRoutingError` JSON envelope is returned — surface it directly, do not produce prose.

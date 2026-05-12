@@ -20,9 +20,22 @@ if [[ "${OMNICLAUDE_HOOKS_DISABLED:-0}" == "1" ]]; then
     cat  # drain stdin
     exit 0
 fi
-if [[ "${OMNICLAUDE_HOOK_TEST_REMINDER:-1}" == "0" ]]; then
-    cat  # drain stdin
-    exit 0
+source "$(dirname "${BASH_SOURCE[0]}")/hook-gate.sh" 2>/dev/null || true
+onex_hook_gate TEST_REMINDER || exit 0
+
+# -----------------------------------------------------------------------
+# Repo-guard: the reminder injects OmniNode-flavored pytest conventions.
+# External users of the plugin in unrelated Python projects should not
+# see ONEX-styled advisories on every Edit/Write.
+# See plugins/onex/hooks/lib/repo_guard.sh.
+# -----------------------------------------------------------------------
+# shellcheck source=../lib/repo_guard.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/repo_guard.sh" 2>/dev/null || true
+if declare -F is_omninode_repo >/dev/null 2>&1; then
+    if ! is_omninode_repo; then
+        cat  # drain stdin, pass through silently
+        exit 0
+    fi
 fi
 
 # -----------------------------------------------------------------------
@@ -99,6 +112,7 @@ REMINDER="[Test Reminder] You just edited ${FILENAME} which matches a handler/pr
 MODIFIED=$(printf '%s' "$TOOL_INFO" | jq \
     --arg reminder "$REMINDER" \
     '.hookSpecificOutput = (.hookSpecificOutput // {}) |
+     .hookSpecificOutput.hookEventName = "PostToolUse" |
      .hookSpecificOutput.additionalContext = (
        ((.hookSpecificOutput.additionalContext // "") + "\n\n" + $reminder)
        | ltrimstr("\n\n")

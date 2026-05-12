@@ -36,11 +36,16 @@ set -euo pipefail
 # --guard-check-only: run environment guards and exit without starting daemon.
 # Used by tests to verify guard behavior in isolation.
 # Must run BEFORE error-guard.sh is sourced (error-guard converts exit 1 → exit 0).
+# --credential-check-only: run only the credential freshness check (OMN-8798)
+# and exit. Emits warnings to stderr for expired/missing credentials in Mode B
+# (kafka configured); no-op for Mode A (no kafka). Used by tests.
 _GUARD_CHECK_ONLY=0
+_CREDENTIAL_CHECK_ONLY=0
 for _arg in "$@"; do
   if [ "$_arg" = "--guard-check-only" ]; then
     _GUARD_CHECK_ONLY=1
-    break
+  elif [ "$_arg" = "--credential-check-only" ]; then
+    _CREDENTIAL_CHECK_ONLY=1
   fi
 done
 
@@ -60,6 +65,58 @@ elif [[ -n "${CLAUDE_PROJECT_DIR:-}" && -f "${CLAUDE_PROJECT_DIR}/.env" ]]; then
     set +a
 fi
 unset _EARLY_PLUGIN_ROOT _EARLY_PROJECT_ROOT
+
+# --- Credential freshness check [OMN-8798] ---
+# Non-blocking warning to stderr when cloud credentials (Mode B) are absent
+# or expired. No-op for Mode A users (no kafka section in ~/.onex/config.yaml).
+# Exact output on failure: "ONEX WARNING: credentials expired, run: onex refresh-credentials"
+# Reads ~/.onex/config.yaml produced by `onex bootstrap apply` (SD-03).
+_onex_credential_check() {
+    local config_file="${ONEX_USER_CONFIG:-${HOME}/.onex/config.yaml}"
+    # Mode A implicit: no config file at all → skip (no warning).
+    [[ -f "${config_file}" ]] || return 0
+    # Mode A explicit: config exists but has no kafka section → skip.
+    # grep for a top-level "kafka:" key (allow leading whitespace for nested form,
+    # but reject commented lines).
+    if ! grep -qE '^[[:space:]]*kafka:[[:space:]]*$' "${config_file}" 2>/dev/null \
+        && ! grep -qE '^[[:space:]]*kafka:[[:space:]]' "${config_file}" 2>/dev/null; then
+        return 0
+    fi
+    # Mode B: kafka configured. Check credential freshness.
+    local kafka_pw_present=0
+    if grep -qE '^[[:space:]]*(KAFKA_SASL_PASSWORD|sasl_password):[[:space:]]*[^[:space:]#]' \
+        "${config_file}" 2>/dev/null; then
+        kafka_pw_present=1
+    fi
+    local token_expired=0
+    local expires_at
+    # grep exits 1 when no match — absorb with `|| true` so pipefail doesn't kill the script.
+    expires_at=$( { grep -E '^[[:space:]]*infisical_token_expires_at:' "${config_file}" 2>/dev/null || true; } \
+        | head -1 \
+        | sed -E 's/^[[:space:]]*infisical_token_expires_at:[[:space:]]*//; s/^"(.*)"$/\1/; s/^'"'"'(.*)'"'"'$/\1/; s/[[:space:]]*$//')
+    if [[ -n "${expires_at}" ]]; then
+        local now_epoch expires_epoch
+        now_epoch=$(date -u +%s)
+        # Try BSD date first (macOS), then GNU date (Linux).
+        expires_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "${expires_at}" +%s 2>/dev/null \
+            || date -u -d "${expires_at}" +%s 2>/dev/null \
+            || echo 0)
+        if [[ "${expires_epoch}" -gt 0 && "${expires_epoch}" -le "${now_epoch}" ]]; then
+            token_expired=1
+        fi
+    fi
+    if [[ "${kafka_pw_present}" -eq 0 || "${token_expired}" -eq 1 ]]; then
+        echo "ONEX WARNING: credentials expired, run: onex refresh-credentials" >&2
+    fi
+    return 0
+}
+
+# --credential-check-only short-circuit: run the check and exit.
+# Used by tests to verify credential UX without booting the full session stack.
+if [ "$_CREDENTIAL_CHECK_ONLY" = "1" ]; then
+    _onex_credential_check
+    exit 0
+fi
 
 # --- Mode Resolution (runs before all guards) ---
 # Resolve omniclaude operating mode (full vs lite) before heavy initialization.
@@ -159,6 +216,7 @@ fi
 # Source shared functions (provides PYTHON_CMD, KAFKA_ENABLED, get_time_ms, log)
 # shellcheck source=common.sh
 source "${HOOKS_DIR}/scripts/common.sh"
+onex_hook_gate SESSION_START || exit 0
 
 # Daemon status file path (used by write_daemon_status for observability)
 readonly DAEMON_STATUS_FILE="${HOOKS_DIR}/logs/daemon-status"
@@ -279,8 +337,34 @@ start_emit_daemon_if_needed() {
             local _pid
             _pid=$(cat "$EMIT_DAEMON_PID_FILE" 2>/dev/null)
             if [[ -n "$_pid" ]] && kill -0 "$_pid" 2>/dev/null; then
-                log "Publisher already running (PID $_pid, fast-path skip)"
-                return 0
+                # Broker mismatch guard: if KAFKA_BOOTSTRAP_SERVERS changed (e.g. stack
+                # switched from main to stability-test on a different port), the running
+                # daemon still targets the old broker. Kill and restart with the new value.
+                if [[ -n "${KAFKA_BOOTSTRAP_SERVERS:-}" ]]; then
+                    local _running_args _running_broker
+                    _running_args=$(ps -ww -p "$_pid" -o args= 2>/dev/null || true)
+                    _running_broker=$(printf '%s\n' "$_running_args" | sed -nE 's/.*--kafka-bootstrap-servers[[:space:]]+([^[:space:]]+).*/\1/p' | head -1)
+                    if [[ -z "$_running_broker" ]]; then
+                        # Broker extraction failed (ps output truncated or unavailable) —
+                        # restart to avoid silently keeping a daemon on a stale broker.
+                        log "Publisher broker check unavailable for PID $_pid — restarting to avoid stale broker"
+                        kill "$_pid" 2>/dev/null || true
+                        sleep 0.2
+                        rm -f "$EMIT_DAEMON_SOCKET" "$EMIT_DAEMON_PID_FILE" 2>/dev/null || true
+                    elif [[ "$_running_broker" != "$KAFKA_BOOTSTRAP_SERVERS" ]]; then
+                        log "Publisher broker mismatch: running=$_running_broker env=$KAFKA_BOOTSTRAP_SERVERS — restarting"
+                        kill "$_pid" 2>/dev/null || true
+                        sleep 0.2
+                        rm -f "$EMIT_DAEMON_SOCKET" "$EMIT_DAEMON_PID_FILE" 2>/dev/null || true
+                        # Fall through to start a fresh daemon below
+                    else
+                        log "Publisher already running (PID $_pid, fast-path skip)"
+                        return 0
+                    fi
+                else
+                    log "Publisher already running (PID $_pid, fast-path skip)"
+                    return 0
+                fi
             fi
         fi
         # Slow path: PID file missing or process dead — fall back to Python ping
@@ -295,58 +379,16 @@ start_emit_daemon_if_needed() {
         fi
     fi
 
-    # Check if publisher module is available (omniclaude.publisher, OMN-1944)
-    if ! "$PYTHON_CMD" -c "import omniclaude.publisher" 2>/dev/null; then
-        # Fallback: try legacy omnibase_infra emit daemon
-        if "$PYTHON_CMD" -c "import omnibase_infra.runtime.emit_daemon" 2>/dev/null; then
-            log "Using legacy emit daemon (omnibase_infra)"
-            _start_legacy_emit_daemon
-            return $?
-        fi
-        log "Publisher module not available (omniclaude.publisher)"
+    # Check if omnimarket runner is available (OMN-10117: cutover from legacy publisher)
+    if ! env -u PYTHONPATH "$BREW_PY" -c "import omnimarket.nodes.node_emit_daemon" 2>/dev/null; then
+        log "Emit daemon module not available (omnimarket.nodes.node_emit_daemon)"
         return 0  # Non-fatal, continue without publisher
     fi
 
-    log "Starting publisher (omniclaude.publisher)..."
+    log "Starting emit daemon (omnimarket.nodes.node_emit_daemon)..."
 
-    # Ensure logs directory exists for publisher output
-    mkdir -p "${HOOKS_DIR}/logs"
-
-    # Pre-flight: verify omnibase_infra>=0.14.0 is installed. (OMN-3251)
-    # omnibase_infra==0.13.0 passes reconnect_backoff_ms to AIOKafkaProducer,
-    # which aiokafka==0.11.0 does not accept, causing the daemon to crash at
-    # startup and all extraction events to fail silently. The fix shipped in
-    # omnibase_infra==0.14.0. When a stale venv is detected we log a targeted
-    # error and skip daemon startup rather than letting it fail in the background.
-    local _oi_ok
-    _oi_ok="$("$PYTHON_CMD" -c "
-import importlib.metadata, sys
-try:
-    v = importlib.metadata.version('omnibase-infra')
-    parts = [int(x) for x in v.split('.')[:2]]
-    if parts >= [0, 14]:
-        print('ok')
-    else:
-        print('stale:' + v)
-except Exception as e:
-    print('unknown:' + str(e))
-" 2>/dev/null || echo "unknown:import-error")"
-
-    if [[ "$_oi_ok" == ok ]]; then
-        : # version is fine, proceed
-    elif [[ "$_oi_ok" == stale:* ]]; then
-        local _stale_ver="${_oi_ok#stale:}"
-        log "ERROR: omnibase_infra==${_stale_ver} in plugin venv is too old (need >=0.14.0). (OMN-3251)"
-        log "ERROR: The emit daemon will crash with: AIOKafkaProducer.__init__() got an unexpected keyword argument 'reconnect_backoff_ms'"
-        log "ERROR: All extraction events (context.utilization, agent.match, latency.breakdown) will be silently dropped."
-        log "FIX: Rebuild the plugin venv to install omnibase_infra>=0.14.0:"
-        log "FIX:   ${CLAUDE_PLUGIN_ROOT}/skills/deploy-local-plugin/deploy.sh --repair-venv"
-        write_daemon_status "stale_dependency"
-        return 0  # Non-fatal: continue without publisher; hook still provides ticket context
-    else
-        log "WARNING: Could not verify omnibase_infra version (${_oi_ok}); proceeding with daemon startup"
-    fi
-    unset _oi_ok
+    # Ensure logs directory exists
+    mkdir -p "${ONEX_STATE_DIR}/hooks/logs"
 
     if [[ -z "${KAFKA_BOOTSTRAP_SERVERS:-}" ]]; then
         log "WARNING: KAFKA_BOOTSTRAP_SERVERS not set - Kafka features disabled"
@@ -356,87 +398,71 @@ except Exception as e:
         return 0  # Non-fatal - continue without Kafka, hook still provides ticket context
     fi
 
-    # Start publisher in background, detached from this process (OMN-1944)
-    nohup "$PYTHON_CMD" -m omniclaude.publisher start \
-        --kafka-servers "$KAFKA_BOOTSTRAP_SERVERS" \
-        ${KAFKA_SECONDARY_BOOTSTRAP_SERVERS:+--secondary-kafka-servers "$KAFKA_SECONDARY_BOOTSTRAP_SERVERS"} \
+    # Start omnimarket emit daemon in background, detached from this process (OMN-10117)
+    # Dual-bus (secondary cluster) publish is intentionally omitted: KAFKA_SECONDARY_BOOTSTRAP_SERVERS
+    # is unset in this environment and the omnimarket runner does not support it.
+    # Decision: accepted data-loss scope per OMN-10116 audit + OMN-10117 dispatch context.
+    nohup env -u PYTHONPATH "$BREW_PY" -m omnimarket.nodes.node_emit_daemon start \
         --socket-path "$EMIT_DAEMON_SOCKET" \
-        >> "${ONEX_STATE_DIR}/hooks/logs/emit-daemon.log" 2>&1 &
+        --pid-path "$EMIT_DAEMON_PID_FILE" \
+        --kafka-bootstrap-servers "$KAFKA_BOOTSTRAP_SERVERS" \
+        --spool-dir "${ONEX_STATE_DIR}/event-spool" \
+        --event-registry "$ONEX_EMIT_EVENT_REGISTRY" \
+        --log-path "${ONEX_STATE_DIR}/hooks/logs/emit-daemon.log" \
+        >/dev/null 2>&1 &
 
     local daemon_pid=$!
     log "Publisher started with PID $daemon_pid"
 
-    # Wait briefly for publisher to create socket (max 200ms in 20ms increments)
-    local wait_count=0
-    local max_wait=10
-    while [[ ! -S "$EMIT_DAEMON_SOCKET" && $wait_count -lt $max_wait ]]; do
-        sleep 0.02
-        ((wait_count++)) || true  # || true: post-increment returns old value (0) when starting from 0; prevents set -e from triggering
-    done
+    # All readiness verification runs in background to keep SessionStart under 50ms.
+    # Waits for socket to appear, then pings to confirm the daemon is accepting connections,
+    # then writes PID file + health marker. Main hook returns immediately (OMN-10621).
+    local _verify_socket="$EMIT_DAEMON_SOCKET"
+    local _verify_pid="$daemon_pid"
+    (
+        # Phase 1: wait for socket file to appear (max 2s in 100ms increments)
+        local wait_count=0
+        local max_wait=20
+        while [[ ! -S "$_verify_socket" && $wait_count -lt $max_wait ]]; do
+            sleep 0.1
+            ((wait_count++)) || true
+        done
 
-    # Retry-based socket verification after file appears.
-    if [[ -S "$EMIT_DAEMON_SOCKET" ]]; then
+        if [[ ! -S "$_verify_socket" ]]; then
+            log "WARNING: Publisher startup timed out after ${max_wait}x100ms, continuing without publisher"
+            mkdir -p "${ONEX_STATE_DIR}/hooks/logs/emit-health" 2>/dev/null || true
+            local _tmp="${ONEX_STATE_DIR}/hooks/logs/emit-health/warning.tmp.$$"
+            printf 'EVENT EMISSION UNHEALTHY: The emit daemon did not create socket within 2s. Socket: %s. Check: %s/hooks/logs/emit-daemon.log\n' \
+                "$_verify_socket" "${ONEX_STATE_DIR}" > "$_tmp" 2>/dev/null
+            mv -f "$_tmp" "${ONEX_STATE_DIR}/hooks/logs/emit-health/warning" 2>/dev/null || rm -f "$_tmp"
+            exit 0
+        fi
+
+        # Phase 2: ping to confirm the daemon accepts connections
         local verify_attempt=0
-        # 2 attempts x 0.2s timeout + 10ms gap = ~0.41s worst-case on sync path.
-        # The daemon should be responsive almost immediately after creating the
-        # socket file; 2 retries is sufficient. Previously 5 (~1.05s worst-case)
-        # which violated the <50ms SessionStart budget even in the async portion.
-        local max_verify_attempts=2
-
+        local max_verify_attempts=5
         while [[ $verify_attempt -lt $max_verify_attempts ]]; do
-            if check_socket_responsive "$EMIT_DAEMON_SOCKET" 0.2; then
+            if check_socket_responsive "$_verify_socket" 0.5; then
                 log "Publisher ready (verified on attempt $((verify_attempt + 1)))"
-                # Write PID file so future sessions can skip the Python ping via kill -0
-                echo "$daemon_pid" > "$EMIT_DAEMON_PID_FILE" 2>/dev/null || true
+                echo "$_verify_pid" > "$EMIT_DAEMON_PID_FILE" 2>/dev/null || true
                 write_daemon_status "running"
                 mkdir -p "${HOOKS_DIR}/logs/emit-health" 2>/dev/null || true
                 rm -f "${HOOKS_DIR}/logs/emit-health/warning" 2>/dev/null || true
-                return 0
+                exit 0
             fi
-            ((verify_attempt++)) || true  # || true: post-increment from 0 returns exit code 1 under set -e
+            ((verify_attempt++)) || true
             sleep 0.01
         done
 
         log "WARNING: Publisher socket exists but not responsive after $max_verify_attempts verification attempts"
-    else
-        log "WARNING: Publisher startup timed out after ${max_wait}x20ms, continuing without publisher"
-    fi
-
-    # Publisher failed to start properly - write warning file and continue
-    mkdir -p "${ONEX_STATE_DIR}/hooks/logs/emit-health" 2>/dev/null || true
-    local _tmp="${ONEX_STATE_DIR}/hooks/logs/emit-health/warning.tmp.$$"
-    cat > "$_tmp" <<WARN  # Note: unquoted delimiter -- variable expansion is intentional
-EVENT EMISSION UNHEALTHY: The emit daemon is not responding to health checks. Intelligence gathering and observability events are NOT being captured. Socket: ${EMIT_DAEMON_SOCKET}. Check: ${ONEX_STATE_DIR}/hooks/logs/emit-daemon.log
-WARN
-    mv -f "$_tmp" "${ONEX_STATE_DIR}/hooks/logs/emit-health/warning" 2>/dev/null || rm -f "$_tmp"
-    # Alert on daemon startup failure (backgrounded, non-blocking)
-    ( slack_notify "daemon_startup" "[omniclaude][${_SLACK_HOST}] Emit daemon failed to start. Intelligence gathering is down. repo=${PROJECT_ROOT:-$PWD} socket=${EMIT_DAEMON_SOCKET} log=${ONEX_STATE_DIR}/hooks/logs/emit-daemon.log" ) &
-    log "Continuing without publisher (session startup not blocked)"
-    return 0
-}
-
-# Legacy fallback: start omnibase_infra emit daemon (will be removed by OMN-1945)
-_start_legacy_emit_daemon() {
-    if [[ -z "${KAFKA_BOOTSTRAP_SERVERS:-}" ]]; then
-        write_daemon_status "kafka_not_configured"
-        return 0
-    fi
-    nohup "$PYTHON_CMD" -m omnibase_infra.runtime.emit_daemon.cli start \
-        --kafka-servers "$KAFKA_BOOTSTRAP_SERVERS" \
-        --socket-path "$EMIT_DAEMON_SOCKET" \
-        --daemonize \
-        >> "${ONEX_STATE_DIR}/hooks/logs/emit-daemon.log" 2>&1 &
-    local daemon_pid=$!
-    log "Legacy daemon started with PID $daemon_pid"
-    local wait_count=0
-    local max_wait=10
-    while [[ ! -S "$EMIT_DAEMON_SOCKET" && $wait_count -lt $max_wait ]]; do
-        sleep 0.02
-        ((wait_count++)) || true  # || true: post-increment from 0 returns exit code 1 under set -e
-    done
-    if [[ -S "$EMIT_DAEMON_SOCKET" ]]; then
-        write_daemon_status "running"
-    fi
+        mkdir -p "${ONEX_STATE_DIR}/hooks/logs/emit-health" 2>/dev/null || true
+        local _tmp2="${ONEX_STATE_DIR}/hooks/logs/emit-health/warning.tmp.$$"
+        printf 'EVENT EMISSION UNHEALTHY: The emit daemon is not responding to health checks. Intelligence gathering and observability events are NOT being captured. Socket: %s. Check: %s/hooks/logs/emit-daemon.log\n' \
+            "$_verify_socket" "${ONEX_STATE_DIR}" > "$_tmp2" 2>/dev/null
+        mv -f "$_tmp2" "${ONEX_STATE_DIR}/hooks/logs/emit-health/warning" 2>/dev/null || rm -f "$_tmp2"
+        ( slack_notify "daemon_startup" "[omniclaude][${_SLACK_HOST}] Emit daemon failed to start. Intelligence gathering is down. repo=${PROJECT_ROOT:-$PWD} socket=${_verify_socket} log=${ONEX_STATE_DIR}/hooks/logs/emit-daemon.log" ) &
+    ) &
+    log "Publisher readiness verification started in background (PID: $!) — hook returns immediately"
     return 0
 }
 
@@ -475,7 +501,7 @@ log "Using Python: $PYTHON_CMD"
 
 # Hook health probe [F32] — verify all Python hook handlers can import
 PROBE_RESULT=$("$PYTHON_CMD" -m omniclaude.hooks.lib.hook_health_probe 2>>"$LOG_FILE") || true
-PROBE_FAILURES=$(echo "$PROBE_RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('failures',0))" 2>/dev/null || echo "0")
+PROBE_FAILURES=$(echo "$PROBE_RESULT" | env -u PYTHONPATH "$BREW_PY" -c "import json,sys; print(json.load(sys.stdin).get('failures',0))" 2>/dev/null || echo "0")
 if [[ "$PROBE_FAILURES" != "0" ]]; then
     log "WARNING: $PROBE_FAILURES hook handler(s) failed import check. See hooks.log for details."
 fi
@@ -1584,5 +1610,12 @@ if [[ -n "${INFISICAL_ADDR:-}" ]]; then
   fi
 fi
 # === End env sync ===
+
+# === Credential freshness check [OMN-8798] ===
+# Warns on expired/missing Mode B credentials. No-op for Mode A.
+# Function defined near the top of this file; runs here so normal sessions
+# surface the warning alongside any other session-start diagnostics.
+_onex_credential_check
+# === End credential freshness check ===
 
 exit 0

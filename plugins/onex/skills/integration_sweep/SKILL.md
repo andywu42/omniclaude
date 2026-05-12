@@ -1,5 +1,5 @@
 ---
-description: Contract-driven post-merge integration verification — reads ModelTicketContract.dod_evidence for recently completed tickets, probes each integration surface (KAFKA, DB, CI, PLUGIN, GITHUB_CI, SCRIPT, CONTAINER_HEALTH, RUNTIME_HEALTH, CROSS_REPO_BOUNDARY, PLAYWRIGHT_BEHAVIORAL), and writes a ModelIntegrationRecord artifact to onex_change_control
+description: Contract-driven post-merge integration verification — dispatches to node_integration_sweep_orchestrator for execution
 version: 1.0.0
 mode: full
 level: advanced
@@ -19,7 +19,8 @@ tags:
 author: OmniClaude Team
 composable: true
 migration_status: pending_node
-migration_target: node_integration_sweep
+migration_target: node_integration_sweep_orchestrator
+# Note: node_integration_sweep_orchestrator is currently a stub; full implementation tracked under OMN-7538
 migration_epic: OMN-7538
 args:
   - name: --date
@@ -47,6 +48,8 @@ outputs:
     description: "clean | fail | partial"
 ---
 
+<!-- routing-enforced: dispatches to node_integration_sweep_orchestrator (stub). functionally-complete requires real node implementation. -->
+
 # integration-sweep
 
 **Skill ID**: `onex:integration_sweep`
@@ -65,7 +68,9 @@ Contract-driven post-merge verification. For each recently completed ticket:
 2. Map `interfaces_touched` fields to `EnumIntegrationSurface` values
 3. Execute the `dod_evidence[*].checks` for each surface
 4. Assemble a `ModelIntegrationRecord` with per-surface `ModelIntegrationProbeResult` entries
-5. Write the artifact to `$ONEX_CC_REPO_PATH/drift/integration/{date}.yaml`
+5. Return the assembled integration record. Durable artifact persistence under
+   `$ONEX_CC_REPO_PATH/drift/integration/` is tracked by OMN-10409 and must not
+   be claimed until the backing node implements it.
 
 The contract IS the guard rail. No contract → UNKNOWN/no_contract → halt.
 

@@ -109,7 +109,7 @@ PROMPT_B64="$(b64 "$PROMPT")"
 if command -v uuidgen >/dev/null 2>&1; then
     CORRELATION_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 else
-    CORRELATION_ID="$($PYTHON_CMD -c 'import uuid; print(str(uuid.uuid4()))' | tr '[:upper:]' '[:lower:]')"
+    CORRELATION_ID="$(env -u PYTHONPATH "$BREW_PY" -c 'import uuid; print(str(uuid.uuid4()))' | tr '[:upper:]' '[:lower:]')"
 fi
 
 SESSION_ID="$(printf %s "$INPUT" | jq -r '.sessionId // .session_id // ""' 2>/dev/null || echo "")"
@@ -180,10 +180,10 @@ WORKFLOW_DETECTED="false"
 if [[ "$PROMPT" =~ ^/[a-zA-Z_-] ]]; then
     SLASH_CMD="$(echo "$PROMPT" | grep -oE '^/[a-zA-Z_-]+' || echo "")"
     log "Slash command detected: ${SLASH_CMD} — skipping agent routing (slash commands manage their own dispatch)"
-    # Route slash commands through polymorphic-agent so the Skill() loader
+    # Route slash commands through a subagent so the Skill() loader
     # runs inside the correct agent context. method="slash_command" lets
     # session-end.sh distinguish this from a real router decision.
-    ROUTING_RESULT='{"selected_agent":"polymorphic-agent","confidence":0.85,"reasoning":"slash_command_delegation","method":"slash_command","domain":"workflow","purpose":"Coordinate skill execution — delegate complex skills to Task tool via Task(subagent_type=onex:polymorphic-agent)","candidates":[{"name":"polymorphic-agent","score":0.85,"description":"Multi-agent workflow coordinator for skills and complex tasks"}]}'
+    ROUTING_RESULT='{"selected_agent":"","confidence":0.85,"reasoning":"slash_command_delegation","method":"slash_command","domain":"workflow","purpose":"Coordinate skill execution — delegate complex skills to Task tool via Task(subagent_type=general-purpose)","candidates":[{"name":"general-purpose","score":0.85,"description":"Multi-agent workflow coordinator for skills and complex tasks"}]}'
     # Update tab activity for statusline (e.g. "/ticket-work" → "ticket-work")
     update_tab_activity "${SLASH_CMD#/}"
 else
@@ -434,7 +434,7 @@ if [[ -f "$_EMIT_STATUS" ]]; then
 
     # Escalation: overrides the degraded warning above for sustained failures
     if [[ $_FAIL_COUNT -ge 10 && $_AGE -le 600 && $_FAIL_TS -gt $_SUCCESS_TS ]]; then
-        EMIT_HEALTH_WARNING="EVENT EMISSION DOWN: ${_FAIL_COUNT} consecutive failures over ${_AGE}s. Daemon likely crashed. Run: pkill -f 'omniclaude.publisher' and start a new session."
+        EMIT_HEALTH_WARNING="EVENT EMISSION DOWN: ${_FAIL_COUNT} consecutive failures over ${_AGE}s. Daemon likely crashed. Run: pkill -f 'omnimarket.nodes.node_emit_daemon' and start a new session."
     fi
 fi
 
@@ -577,13 +577,51 @@ if [[ -n "$AGENTIC_WORK_PRODUCT" ]]; then
 fi
 
 # -----------------------------
+# Delegation Rule Gate (OMN-10278)
+# -----------------------------
+# Load ~/.omninode/delegation/delegation-rules.yaml and determine whether
+# the delegation bridge should fire for this task class.
+# behavior=off  → skip bridge entirely
+# behavior=auto → bridge fires unconditionally (subject to existing guards)
+# behavior=suggest → bridge fires (default; same as pre-existing behavior)
+# Missing file → existing behavior preserved (bridge fires as before)
+_DELEGATION_BEHAVIOR="suggest"  # default: no config = preserve existing behavior
+_RULE_LOADER="${HOOKS_LIB}/delegation_rule_loader.py"
+if [[ -f "$_RULE_LOADER" ]]; then
+    _RULE_RESULT=$(
+        HOOKS_LIB="$HOOKS_LIB" \
+        _INTENT_CLASS="${_INTENT_CLASS:-GENERAL}" \
+        _INTENT_CONF="${_INTENT_CONF:-0}" \
+        "$PYTHON_CMD" - <<'_PYEOF' 2>/dev/null
+import sys, os
+from pathlib import Path
+_lib = str(Path(os.environ.get("HOOKS_LIB", "")).resolve())
+if _lib and _lib not in sys.path:
+    sys.path.insert(0, _lib)
+try:
+    from delegation_rule_loader import DelegationRuleLoader
+    loader = DelegationRuleLoader()
+    decision = loader.get_rule(
+        os.environ.get("_INTENT_CLASS", "GENERAL").lower(),
+        confidence=float(os.environ.get("_INTENT_CONF", "0") or "0"),
+    )
+    print(decision.behavior if decision else "suggest")
+except Exception:
+    print("suggest")
+_PYEOF
+    ) || _RULE_RESULT="suggest"
+    _DELEGATION_BEHAVIOR="${_RULE_RESULT:-suggest}"
+    log "Delegation rule gate: intent=${_INTENT_CLASS:-GENERAL} behavior=${_DELEGATION_BEHAVIOR}"
+fi
+
+# -----------------------------
 # Delegation Bridge (OMN-8746)
 # -----------------------------
-# Publish a delegation-request command to the ONEX node pipeline for every
+# Publish a delegate-task command to the ONEX node pipeline for every
 # non-slash, non-automated prompt. node_delegation_orchestrator on .201
 # handles routing, LLM inference, and quality gating.
 # Requires Kafka to be reachable — there is no local prose fallback.
-if [[ "$WORKFLOW_DETECTED" != "true" ]] && [[ ! "$PROMPT" =~ ^/ ]]; then
+if [[ "$WORKFLOW_DETECTED" != "true" ]] && [[ ! "$PROMPT" =~ ^/ ]] && [[ "$_DELEGATION_BEHAVIOR" != "off" ]]; then
     _BRIDGE_SCRIPT="${PLUGIN_ROOT}/skills/delegate/_lib/run.py"
     if [[ -f "$_BRIDGE_SCRIPT" ]]; then
         (
@@ -875,7 +913,7 @@ if [[ "$KAFKA_ENABLED" == "true" ]] && [[ -f "${HOOKS_LIB}/extraction_event_emit
     _EXTRACTION_PAYLOAD=$(jq -n \
         --arg session_id "$SESSION_ID" \
         --arg correlation_id "$CORRELATION_ID" \
-        --arg agent_name "${AGENT_NAME:-polymorphic-agent}" \
+        --arg agent_name "${AGENT_NAME:-}" \
         --arg cohort "${COHORT:-treatment}" \
         --argjson injection_occurred "$_INJECTION_OCCURRED" \
         --argjson patterns_count "${PATTERN_COUNT:-0}" \

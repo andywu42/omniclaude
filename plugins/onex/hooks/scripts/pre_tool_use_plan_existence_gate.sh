@@ -19,10 +19,8 @@ if [[ "${OMNICLAUDE_HOOKS_DISABLED:-0}" == "1" ]]; then
     cat  # drain stdin
     exit 0
 fi
-if [[ "${OMNICLAUDE_HOOK_PLAN_EXISTENCE_GATE:-1}" == "0" ]]; then
-    cat  # drain stdin
-    exit 0
-fi
+source "$(dirname "${BASH_SOURCE[0]}")/hook-gate.sh" 2>/dev/null || true
+onex_hook_gate PLAN_EXISTENCE_GATE || exit 0
 
 # -----------------------------------------------------------------------
 # Read stdin (Claude Code PreToolUse JSON)
