@@ -1,17 +1,15 @@
 # SPDX-FileCopyrightText: 2025 OmniNode.ai Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for execute_dod_verify implementation in ticket-pipeline prompt.md.
+"""Tests for ticket_pipeline dispatch-only shim (S20 thinning).
 
-Validates that the Phase 2.5 (dod_verify) handler is fully defined — not just
-referenced in the handler dict, but contains a concrete implementation body
-that invokes the evidence runner, reads policy mode, writes receipts, and
-branches on hard/soft/advisory enforcement.
+Validates that ticket_pipeline/prompt.md is a dispatch-only shim routing to
+node_ticket_pipeline. All DoD verify and phase logic lives in the node handler.
+The shim must contain no inline FSM, no execute_dod_verify, no subprocess wrappers.
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -26,104 +24,59 @@ PROMPT_MD = (
 )
 
 
+def _assert_dispatch_only_pipeline(content: str) -> None:
+    assert "onex run-node node_ticket_pipeline" in content
+    assert "SkillRoutingError" in content
+    assert "Do not fall back to inline phase execution" in content
+    assert "execute_dod_verify" not in content
+    assert "subprocess" not in content.lower()
+    for marker in ("state_machine", "on_entry", "transition", "run-step"):
+        assert marker not in content
+
+
 @pytest.mark.unit
 class TestExecuteDodVerifyExists:
-    """Smoke tests: execute_dod_verify body exists in prompt.md."""
+    """S20: ticket_pipeline is a dispatch-only shim — no inline DoD verify."""
 
     def test_prompt_md_exists(self) -> None:
         assert PROMPT_MD.exists(), f"prompt.md not found at {PROMPT_MD}"
 
     def test_handler_dict_references_execute_dod_verify(self) -> None:
+        """S20: handler dict and inline execute_dod_verify are absent; dispatch routes to node."""
         content = PROMPT_MD.read_text()
-        assert '"dod_verify": execute_dod_verify' in content, (
-            "Handler dict must reference execute_dod_verify"
-        )
+        _assert_dispatch_only_pipeline(content)
 
     def test_execute_dod_verify_has_implementation_body(self) -> None:
-        """The function must have a real body — not just a handler dict ref."""
+        """S20: no inline execute_dod_verify — all DoD logic is in node_ticket_pipeline."""
         content = PROMPT_MD.read_text()
-        # There must be a def or function heading for execute_dod_verify
-        # beyond just the handler dict line
-        handler_dict_line = '"dod_verify": execute_dod_verify'
-        occurrences = [
-            i
-            for i, line in enumerate(content.splitlines())
-            if "execute_dod_verify" in line and handler_dict_line not in line
-        ]
-        assert len(occurrences) >= 1, (
-            "execute_dod_verify must appear outside the handler dict "
-            "(i.e., have an implementation body)"
-        )
+        _assert_dispatch_only_pipeline(content)
 
 
 @pytest.mark.unit
 class TestExecuteDodVerifyPromptContract:
-    """Prompt-contract tests: implementation invokes evidence runner,
-    reads policy mode, writes receipt path, branches on enforcement modes."""
+    """S20: dispatch-only shim — node_ticket_pipeline owns all phase logic."""
 
     @pytest.fixture(autouse=True)
     def _load_content(self) -> None:
         self.content = PROMPT_MD.read_text()
-        # Extract the Phase 2.5 section through the next phase heading
-        lines = self.content.splitlines()
-        start = None
-        end = None
-        for i, line in enumerate(lines):
-            if "Phase 2.5" in line and "DOD VERIFY" in line:
-                start = i
-            elif start is not None and re.match(r"^###\s+Phase\s+\d", line):
-                end = i
-                break
-        if start is not None:
-            self.phase_section = "\n".join(lines[start : end if end else len(lines)])
-        else:
-            self.phase_section = ""
 
     def test_phase_section_exists(self) -> None:
-        assert self.phase_section, "Phase 2.5 DOD VERIFY section not found"
+        _assert_dispatch_only_pipeline(self.content)
 
     def test_invokes_evidence_runner(self) -> None:
-        assert (
-            "dod_evidence_runner" in self.phase_section
-            or "run_dod_evidence" in self.phase_section
-        ), "Phase 2.5 must invoke the DoD evidence runner"
+        _assert_dispatch_only_pipeline(self.content)
 
     def test_reads_policy_mode(self) -> None:
-        assert (
-            "dod_enforcement" in self.phase_section
-            or "policy_mode" in self.phase_section
-        ), "Phase 2.5 must read DoD enforcement policy mode"
+        _assert_dispatch_only_pipeline(self.content)
 
     def test_writes_receipt_path(self) -> None:
-        assert (
-            "receipt_path" in self.phase_section
-            or "dod_report.json" in self.phase_section
-        ), "Phase 2.5 must write/reference evidence receipt path"
+        _assert_dispatch_only_pipeline(self.content)
 
     def test_branches_on_hard_soft_advisory(self) -> None:
-        assert "hard" in self.phase_section, "Phase 2.5 must handle hard mode"
-        assert "soft" in self.phase_section, "Phase 2.5 must handle soft mode"
-        assert "advisory" in self.phase_section, "Phase 2.5 must handle advisory mode"
+        _assert_dispatch_only_pipeline(self.content)
 
     def test_returns_stable_result_codes(self) -> None:
-        """Implementation must define stable result codes."""
-        assert "VERIFIED_PASS" in self.phase_section, "Must return VERIFIED_PASS result"
-        assert "VERIFIED_FAIL" in self.phase_section, "Must return VERIFIED_FAIL result"
-        assert "SKIPPED_NO_CONTRACT" in self.phase_section, (
-            "Must return SKIPPED_NO_CONTRACT result"
-        )
-        assert "SKIPPED_NO_DOD_EVIDENCE" in self.phase_section, (
-            "Must return SKIPPED_NO_DOD_EVIDENCE result"
-        )
-        assert "ERROR_RUNNER_FAILURE" in self.phase_section, (
-            "Must return ERROR_RUNNER_FAILURE result"
-        )
+        _assert_dispatch_only_pipeline(self.content)
 
     def test_includes_artifact_paths(self) -> None:
-        """Implementation must include receipt_path and contract_path in artifacts."""
-        assert "receipt_path" in self.phase_section, (
-            "Must include receipt_path in artifacts"
-        )
-        assert "contract_path" in self.phase_section, (
-            "Must include contract_path in artifacts"
-        )
+        _assert_dispatch_only_pipeline(self.content)

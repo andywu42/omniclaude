@@ -138,43 +138,54 @@ class TestDecomposeEpicMandatoryContract:
 
 @pytest.mark.unit
 class TestTicketWorkMandatoryContract:
-    """ticket_work prompt.md must auto-generate a stub contract during intake (OMN-8647)."""
+    """S20: ticket_work is a dispatch-only shim routing to node_ticket_work (OMN-8767).
+
+    All contract generation, intake, seam detection, and issue embedding logic
+    lives in node_ticket_work. The shim must contain no inline phase logic.
+    """
 
     PROMPT_FILE = _SKILLS_DIR / "ticket_work" / "prompt.md"
+
+    def _content(self) -> str:
+        return self.PROMPT_FILE.read_text(encoding="utf-8")
+
+    def _assert_dispatch_only_shim(self, content: str) -> None:
+        assert "onex run-node node_ticket_work" in content
+        assert "SkillRoutingError" in content
+        assert "Do not fall back to inline phase execution" in content
+        assert "ProtocolProjectTracker" in content
+        assert "resolve_project_tracker()" in content
+        assert "tracker.save_issue(" not in content
+        assert "def intake" not in content
+        assert "def research" not in content
 
     def test_prompt_file_exists(self) -> None:
         assert self.PROMPT_FILE.is_file(), f"Missing: {self.PROMPT_FILE}"
 
     def test_auto_generate_mentioned_in_initialization(self) -> None:
-        content = self.PROMPT_FILE.read_text(encoding="utf-8")
-        assert (
-            "auto-generate" in content.lower() and "ModelTicketContract" in content
-        ), (
-            "ticket_work initialization must describe auto-generating a stub contract when absent"
-        )
+        """S20: contract generation is owned by node_ticket_work, not the shim."""
+        self._assert_dispatch_only_shim(self._content())
 
     def test_intake_phase_generates_stub_contract(self) -> None:
-        content = self.PROMPT_FILE.read_text(encoding="utf-8")
-        assert "stub ModelTicketContract" in content or (
-            "generate" in content and "stub" in content and "intake" in content
-        ), "ticket_work intake phase must generate a stub contract when none is found"
+        """S20: stub contract generation lives in node_ticket_work."""
+        content = self._content()
+        self._assert_dispatch_only_shim(content)
+        assert '"ticket_id": "<ticket_id>"' in content
 
     def test_contract_generation_is_mandatory(self) -> None:
-        content = self.PROMPT_FILE.read_text(encoding="utf-8")
-        assert "MANDATORY" in content and "contract" in content.lower(), (
-            "ticket_work must mark contract generation as MANDATORY"
-        )
+        """S20: mandatory contract generation enforced in node_ticket_work."""
+        content = self._content()
+        self._assert_dispatch_only_shim(content)
+        assert "The node is the single source of truth for ticket work logic" in content
 
     def test_seam_detection_in_intake(self) -> None:
-        content = self.PROMPT_FILE.read_text(encoding="utf-8")
-        assert "seam_signals" in content, (
-            "ticket_work intake phase must run seam detection when auto-generating the contract"
-        )
+        """S20: seam detection runs in node_ticket_work, not the shim."""
+        content = self._content()
+        self._assert_dispatch_only_shim(content)
+        assert "no LLM orchestration" in content
 
     def test_save_issue_called_to_embed_contract(self) -> None:
-        content = self.PROMPT_FILE.read_text(encoding="utf-8")
-        # After OMN-8823 migration: save_issue replaced by tracker.update_issue (DI pattern)
-        assert "tracker.update_issue" in content, (
-            "ticket_work must call tracker.update_issue to embed the auto-generated contract "
-            "(OMN-8823: mcp__linear-server__save_issue replaced by ProtocolProjectTracker DI)"
-        )
+        """S20: issue embedding is handled by node_ticket_work."""
+        content = self._content()
+        self._assert_dispatch_only_shim(content)
+        assert "handler owns Linear access" in content
