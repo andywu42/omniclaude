@@ -10,6 +10,10 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from omniclaude.nodes.node_delegation_orchestrator.enums.enum_cli_recipient import (
+    EnumCliRecipient,
+)
+
 
 class ModelDelegationDispatchResult(BaseModel):
     """Result of the dispatch handler — routing decision.
@@ -88,6 +92,27 @@ class ModelDelegationOutcome(BaseModel):
     )
     response: str | None = Field(
         default=None, description="Generated text (only on success)"
+    )
+    # CLI subprocess result fields — populated when delegation was routed via HandlerCrossCLIInvoker
+    cli_stdout: str = Field(default="", description="Captured stdout from CLI process")
+    cli_stderr: str = Field(default="", description="Captured stderr from CLI process")
+    cli_exit_code: int | None = Field(
+        default=None,
+        description="CLI process exit code; None for non-CLI delegations",
+    )
+    cli_files_modified: list[str] = Field(
+        default_factory=list,
+        description="Paths written by CLI; empty under codex read-only",
+    )
+    cli_runtime_seconds: float | None = Field(
+        default=None, description="Wall-clock CLI execution time"
+    )
+    cli_working_directory: str | None = Field(
+        default=None, description="CWD used for CLI subprocess"
+    )
+    cli_recipient: EnumCliRecipient | None = Field(
+        default=None,
+        description="CLI that executed the task; None for non-CLI delegations",
     )
 
 
