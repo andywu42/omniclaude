@@ -79,7 +79,8 @@ def _serialize_lock(lock: ModelEpicNamespaceLock) -> str:
     try:
         import yaml
 
-        return yaml.dump(lock.model_dump(mode="json"), default_flow_style=False)
+        dumped: str = yaml.dump(lock.model_dump(mode="json"), default_flow_style=False)
+        return dumped
     except ImportError:
         import json
 
