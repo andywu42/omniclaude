@@ -106,7 +106,7 @@ the consuming `node_delegate_skill_orchestrator`.
 
 ## Related
 
-- **Bridge implementation**: `plugins/onex/skills/delegate/_lib/run.py`
+- **Bridge implementation**: `plugins/onex/skills/delegate/_lib/handler_delegate_skill.py`
 - **TaskClassifier**: `src/omniclaude/lib/task_classifier.py`
 - **Market adapter**: `omnimarket.adapters.claude_code.delegate.DelegationDispatchAdapter`
 - **Orchestrator contract**: `omnimarket/src/omnimarket/nodes/node_delegate_skill_orchestrator/contract.yaml`

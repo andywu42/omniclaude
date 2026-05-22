@@ -16,8 +16,8 @@ if str(_DELEGATE_LIB) not in sys.path:
 
 
 def test_delegate_skill_exposes_no_direct_llm_helpers() -> None:
-    sys.modules.pop("run", None)
-    import run as run_module  # noqa: PLC0415
+    sys.modules.pop("handler_delegate_skill", None)
+    import handler_delegate_skill as run_module  # noqa: PLC0415
 
     mod = importlib.reload(run_module)
 
@@ -26,7 +26,7 @@ def test_delegate_skill_exposes_no_direct_llm_helpers() -> None:
 
 
 def test_delegate_skill_source_has_no_direct_llm_tokens() -> None:
-    source = (_DELEGATE_LIB / "run.py").read_text(encoding="utf-8")
+    source = (_DELEGATE_LIB / "handler_delegate_skill.py").read_text(encoding="utf-8")
 
     for token in ("_call_llm_via_curl", "curl", "vLLM", "LLM_CODER_URL"):
         assert token not in source

@@ -14,7 +14,7 @@ import pytest
 _TESTS_DIR = Path(__file__).parent
 _REPO_ROOT = _TESTS_DIR.parent.parent.parent.parent
 _DELEGATE_LIB = _REPO_ROOT / "plugins" / "onex" / "skills" / "delegate" / "_lib"
-_RUN_PATH = _DELEGATE_LIB / "run.py"
+_HANDLER_PATH = _DELEGATE_LIB / "handler_delegate_skill.py"
 
 if _DELEGATE_LIB.exists() and str(_DELEGATE_LIB) not in sys.path:
     sys.path.insert(0, str(_DELEGATE_LIB))
@@ -22,14 +22,14 @@ if _DELEGATE_LIB.exists() and str(_DELEGATE_LIB) not in sys.path:
 
 @pytest.fixture
 def delegate_run() -> ModuleType:
-    sys.modules.pop("run", None)
-    import run as m  # noqa: PLC0415
+    sys.modules.pop("handler_delegate_skill", None)
+    import handler_delegate_skill as m  # noqa: PLC0415
 
     return importlib.reload(m)
 
 
-def test_run_py_has_no_legacy_transport_tokens() -> None:
-    source = _RUN_PATH.read_text(encoding="utf-8")
+def test_delegate_handler_has_no_legacy_transport_tokens() -> None:
+    source = _HANDLER_PATH.read_text(encoding="utf-8")
     forbidden = (
         "confluent_kafka",
         "urllib.request",
@@ -44,8 +44,8 @@ def test_run_py_has_no_legacy_transport_tokens() -> None:
         assert token not in source
 
 
-def test_run_py_has_no_legacy_dispatch_helpers() -> None:
-    source = _RUN_PATH.read_text(encoding="utf-8")
+def test_delegate_handler_has_no_legacy_dispatch_helpers() -> None:
+    source = _HANDLER_PATH.read_text(encoding="utf-8")
     forbidden_helpers = (
         "_dispatch_via_",
         "_run_inprocess",
@@ -77,7 +77,7 @@ def test_no_runtime_transport_env_vars_read_at_import(
     ):
         monkeypatch.delenv(name, raising=False)
 
-    sys.modules.pop("run", None)
-    import run as m  # noqa: PLC0415
+    sys.modules.pop("handler_delegate_skill", None)
+    import handler_delegate_skill as m  # noqa: PLC0415
 
     importlib.reload(m)
