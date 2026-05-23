@@ -4,22 +4,16 @@
 
 from __future__ import annotations
 
-import importlib
-import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_DELEGATE_LIB = _REPO_ROOT / "plugins" / "onex" / "skills" / "delegate" / "_lib"
-
-if str(_DELEGATE_LIB) not in sys.path:
-    sys.path.insert(0, str(_DELEGATE_LIB))
+_DELEGATE_SKILL = _REPO_ROOT / "plugins" / "onex" / "skills" / "delegate"
+_PROMPT_PATH = _DELEGATE_SKILL / "prompt.md"
+_LEGACY_RUN_PATH = _DELEGATE_SKILL / "_lib" / "run.py"
 
 
 def test_delegate_skill_exposes_no_inprocess_symbols() -> None:
-    sys.modules.pop("handler_delegate_skill", None)
-    import handler_delegate_skill as run_module  # noqa: PLC0415
-
-    mod = importlib.reload(run_module)
+    source = _PROMPT_PATH.read_text(encoding="utf-8")
 
     for name in (
         "InProcessDelegationRunner",
@@ -27,11 +21,13 @@ def test_delegate_skill_exposes_no_inprocess_symbols() -> None:
         "_run_inprocess",
         "_write_evidence_bundle",
     ):
-        assert not hasattr(mod, name)
+        assert name not in source
+
+    assert not _LEGACY_RUN_PATH.exists()
 
 
 def test_delegate_cli_has_no_local_flag() -> None:
-    source = (_DELEGATE_LIB / "handler_delegate_skill.py").read_text(encoding="utf-8")
+    source = _PROMPT_PATH.read_text(encoding="utf-8")
 
     assert "--local" not in source
     assert "force_local" not in source

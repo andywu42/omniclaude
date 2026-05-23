@@ -1,98 +1,59 @@
 ---
-version: 1.0.3
-description: Delegate tasks through the market-owned delegate skill adapter. Classifies prompt, maps legacy CLI flags to adapter metadata, and lets omnimarket own runtime dispatch and terminal correlation.
+version: 2.0.0
+description: "Dispatch-only shim for local LLM delegation. Classifies prompt, constructs typed input, dispatches to node_delegate_skill_orchestrator (omnimarket) via onex node. No inline LLM calls, no Kafka, no bus bootstrap."
 mode: full
 level: advanced
-debug: true
-index: true
+debug: false
+category: delegation
+tags: [delegation, dispatch-only, thin-shim, local-llm]
+composable: false
 args:
   - name: prompt
     description: "The task to delegate (e.g., 'write unit tests for verify_registration.py')"
     required: true
-  - name: --source-file
-    description: "Source file path for context (optional)"
+  - name: --task-type
+    description: "Override task classification: test, document, research, code_generation, refactor, reasoning, review (default: auto-classify from prompt)"
     required: false
   - name: --max-tokens
     description: "Maximum tokens for the LLM response (default: 2048)"
     required: false
-  - name: --recipient
-    description: "Target CLI recipient: auto, claude, opencode, or codex"
-    required: false
-  - name: --wait
-    description: "Request runtime terminal-result correlation instead of fire-and-forget routing"
-    required: false
+inputs:
+  - name: prompt
+    description: "User prompt to delegate to a local LLM"
+outputs:
+  - name: status
+    description: "completed | failed | timeout"
+  - name: response
+    description: "LLM response content"
+  - name: model_name
+    description: "Model that handled the request"
+  - name: cost_savings_usd
+    description: "Estimated cost savings vs Claude baseline"
 ---
 
-# Delegate
+# /onex:delegate — dispatch-only shim
 
-Thin compatibility skill that classifies a user prompt and submits it through
-`omnimarket.adapters.claude_code.delegate.DelegationDispatchAdapter` to
-`delegate_skill.orchestrate` on `node_delegate_skill_orchestrator`. The skill
-surface does not publish directly to the event bus, does not open transport
-clients, and does not run local inference. Omnimarket owns route resolution,
-runtime dispatch, terminal-result correlation, serialization, and transport
-errors.
-
-## How It Works
-
-1. Parse the user's prompt.
-2. Classify the task type using `TaskClassifier`.
-3. Map legacy `/onex:delegate` flags into the market adapter payload and metadata.
-4. Call `DelegationDispatchAdapter.dispatch_sync(command_name="delegate_skill.orchestrate")`
-   for `node_delegate_skill_orchestrator`.
-5. Return the adapter response with the correlation ID, resolved node, command
-   topic, and terminal event when available.
+**Skill ID**: `onex:delegate` · **Backing node**: `omnimarket/src/omnimarket/nodes/node_delegate_skill_orchestrator/` · **Ticket**: OMN-10604
 
 ## Task Types
 
-Classification maps to three delegatable intents from `TaskClassifier`:
-
-| Task Type | Trigger Keywords | Example |
-|-----------|-----------------|---------|
-| `test` | test, testing, unit test, pytest, assert | "write unit tests for verify_registration.py" |
-| `document` | document, docstring, README, explain | "add docstrings to the handler module" |
-| `research` | what, how, explain, investigate, analyze | "what does the routing reducer do?" |
-
-Non-delegatable intents are rejected before runtime dispatch.
-
-## Runtime Request Payload
-
-```json
-{
-  "prompt": "write unit tests for verify_registration.py",
-  "correlation_id": "550e8400-e29b-41d4-a716-446655440000",
-  "session_id": "session-abc123",
-  "prompt_length": 43,
-  "metadata": {
-    "source_file_path": "/path/to/verify_registration.py",
-    "session_id": "session-abc123",
-    "recipient": "auto",
-    "working_directory": null,
-    "codex_sandbox_mode": null
-  },
-  "max_tokens": 2048,
-  "wait": false
-}
-```
-
-The payload is compiled by the market adapter; runtime-side validation occurs on
-the consuming `node_delegate_skill_orchestrator`.
-
-## Runtime Path
-
-- **Skill adapter**: `omnimarket.adapters.claude_code.delegate.DelegationDispatchAdapter`
-- **Command name**: `delegate_skill.orchestrate`
-- **Runtime node**: `node_delegate_skill_orchestrator`
-- **Command topic**: resolved from the omnimarket delegate skill contract
-- **Terminal topics**: resolved from the omnimarket delegate skill contract
+| Task Type | When to use | Routed model |
+|-----------|------------|--------------|
+| `test` | write tests, pytest, assertions | Qwen3-Coder or DeepSeek-R1 |
+| `document` | docstrings, README, explanations | DeepSeek-R1 |
+| `research` | investigate, analyze, explain | DeepSeek-R1 |
+| `code_generation` | write code, create app, implement | Qwen3-Coder |
+| `refactor` | refactoring, cleanup | Qwen3-Coder |
+| `reasoning` | think through, analyze decision | DeepSeek-R1 |
+| `review` | code review, audit | DeepSeek-R1 |
 
 ## Usage
 
 ```
-/delegate write unit tests for verify_registration.py
-/delegate --source-file src/omniclaude/hooks/handler_event_emitter.py add docstrings
-/delegate --max-tokens 4096 --recipient codex analyze the routing architecture
-/delegate --wait research the cross-CLI bridge terminal-result flow
+/delegate explain what a calendar app needs
+/delegate --task-type code_generation write a Python HTTP server
+/delegate --max-tokens 4096 analyze the routing architecture
+/delegate --task-type test write unit tests for verify_registration.py
 ```
 
 ## What This Skill Does NOT Do
@@ -106,7 +67,6 @@ the consuming `node_delegate_skill_orchestrator`.
 
 ## Related
 
-- **Bridge implementation**: `plugins/onex/skills/delegate/_lib/handler_delegate_skill.py`
 - **TaskClassifier**: `src/omniclaude/lib/task_classifier.py`
 - **Market adapter**: `omnimarket.adapters.claude_code.delegate.DelegationDispatchAdapter`
 - **Orchestrator contract**: `omnimarket/src/omnimarket/nodes/node_delegate_skill_orchestrator/contract.yaml`
