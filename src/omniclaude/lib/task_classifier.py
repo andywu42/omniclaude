@@ -11,8 +11,57 @@ Used to guide manifest section selection and relevance filtering.
 import re
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from types import MappingProxyType
 from typing import ClassVar
+
+import yaml
+
+_BIFROST_YAML_PATH = (
+    Path(__file__).parent.parent / "delegation" / "bifrost_delegation.yaml"
+)
+
+
+def _load_delegate_model_name() -> str:
+    """Return the backend_id of the first local code_generation backend.
+
+    Packaged bifrost contracts intentionally leave served model names empty;
+    concrete model IDs belong in overlays. The classifier only needs a stable
+    logical routing target, so it resolves a contract-declared backend_id.
+    """
+    if not _BIFROST_YAML_PATH.exists():
+        raise RuntimeError(
+            f"Missing bifrost delegation contract: {_BIFROST_YAML_PATH}. "
+            "TaskClassifier requires contract-declared model routing; "
+            "hardcoded model fallbacks are forbidden."
+        )
+
+    raw = yaml.safe_load(_BIFROST_YAML_PATH.read_text(encoding="utf-8")) or {}
+    backends = raw.get("backends", [])
+    if not isinstance(backends, list):
+        raise RuntimeError(
+            f"Invalid bifrost delegation contract: {_BIFROST_YAML_PATH}. "
+            "'backends' must be a list."
+        )
+
+    # Prefer local backends with code_generation capability.
+    for b in backends:
+        if b.get("tier") == "local" and "code_generation" in b.get(
+            "capabilities", []
+        ):
+            return str(b["backend_id"])
+    # Fallback: any local backend declared by the same contract.
+    for b in backends:
+        if b.get("tier") == "local":
+            return str(b["backend_id"])
+    # Last resort: first contract-declared backend.
+    if backends:
+        return str(backends[0]["backend_id"])
+
+    raise RuntimeError(
+        f"No backends declared in bifrost delegation contract: {_BIFROST_YAML_PATH}. "
+        "TaskClassifier cannot resolve a delegate model."
+    )
 
 
 class TaskIntent(Enum):
@@ -442,8 +491,8 @@ class TaskClassifier:
         }
     )
 
-    #: Name/identifier of the default delegate model.
-    _DELEGATE_MODEL_NAME: str = "qwen2.5-14b"
+    #: Name/identifier of the default delegate model — resolved from bifrost_delegation.yaml.
+    _DELEGATE_MODEL_NAME: str = _load_delegate_model_name()
 
     # ---------------------------------------------------------------------------
     # Internal helpers
