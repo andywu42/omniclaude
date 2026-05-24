@@ -5,6 +5,7 @@ version: 1.0.0
 level: intermediate
 debug: false
 category: review
+boundary_exempt: true
 tags:
   - review
   - pr
@@ -28,7 +29,7 @@ args:
     description: "Comma-separated reviewer model list. Required — caller must pass model keys registered in ModelInferenceBridgeConfig.model_configs (e.g. LLM_CODER_URL-backed key). Prior hardcoded defaults produced a silent-clean verdict when the keys weren't in the registry (OMN-9112)."
     required: true
   - name: --judge-model
-    description: "Judge model identifier (default: deepseek-r1)"
+    description: "Judge model identifier (key registered in ModelInferenceBridgeConfig). Omit to use the node contract's configured default."
     required: false
   - name: --max-findings
     description: "Cap on review threads posted per PR (default: 20)"
@@ -47,7 +48,7 @@ Runs the full PR review bot FSM pipeline:
 2. Run multi-model adversarial review (models must be registered in ModelInferenceBridgeConfig; caller passes keys)
 3. Post findings as GitHub PR review threads via HandlerThreadPoster
 4. Watch threads for developer responses via HandlerThreadWatcher
-5. Verify resolutions via HandlerJudgeVerifier (deepseek-r1 by default)
+5. Verify resolutions via HandlerJudgeVerifier (judge model from node contract default or --judge-model)
 6. Post summary verdict comment via HandlerReportPoster
 
 **Announce at start:** "I'm using the pr-review-bot skill to run the automated PR review pipeline."
@@ -55,13 +56,13 @@ Runs the full PR review bot FSM pipeline:
 ## Quick Start
 
 ```
-/pr_review_bot 42 --reviewer-models qwen3-coder
-/pr_review_bot 42 OmniNode-ai/omnimarket --reviewer-models qwen3-coder
-/pr_review_bot 42 --dry-run --reviewer-models qwen3-coder
-/pr_review_bot 42 --severity-threshold CRITICAL --reviewer-models qwen3-coder
+/pr_review_bot 42 --reviewer-models <reviewer-key>
+/pr_review_bot 42 OmniNode-ai/omnimarket --reviewer-models <reviewer-key>
+/pr_review_bot 42 --dry-run --reviewer-models <reviewer-key>
+/pr_review_bot 42 --severity-threshold CRITICAL --reviewer-models <reviewer-key>
 ```
 
-(`qwen3-coder` above is illustrative; substitute any key registered in
+(`<reviewer-key>` above is illustrative; substitute any key registered in
 `ModelInferenceBridgeConfig.model_configs` for your deployment. Unknown keys
 now raise `ValueError` per OMN-9112 fail-loud policy.)
 
@@ -75,7 +76,7 @@ Parse args:
 - `--dry-run`: boolean flag, default false
 - `--severity-threshold`: one of `CRITICAL`, `MAJOR`, `MINOR` (default `MAJOR`)
 - `--reviewer-models`: comma-separated string (REQUIRED — must be keys registered in `ModelInferenceBridgeConfig.model_configs`; unknown keys now raise ValueError instead of returning a silent clean verdict, per OMN-9112)
-- `--judge-model`: string (default `deepseek-r1`)
+- `--judge-model`: string (optional — key registered in `ModelInferenceBridgeConfig.model_configs`; omit to use node contract default)
 - `--max-findings`: integer (default `20`)
 
 ### Step 2 — Verify GITHUB_TOKEN
@@ -113,7 +114,7 @@ print(json.dumps({
     "dry_run": os.environ.get("_DRY_RUN", "false").lower() == "true",
     "severity_threshold": os.environ.get("_SEVERITY_THRESHOLD", "MAJOR"),
     "reviewer_models": reviewer_models,
-    "judge_model": os.environ.get("_JUDGE_MODEL", "deepseek-r1"),
+    "judge_model": os.environ.get("_JUDGE_MODEL") or None,
     "max_findings_per_pr": int(os.environ.get("_MAX_FINDINGS", "20")),
 }))
 PYEOF
@@ -203,7 +204,7 @@ Runtime command payload
     → HandlerReviewer        (caller-supplied --reviewer-models; keys resolved via ModelInferenceBridgeConfig.model_configs)
     → HandlerThreadPoster    (post GitHub review threads)
     → HandlerThreadWatcher   (watch for developer responses)
-    → HandlerJudgeVerifier   (deepseek-r1 judge)
+    → HandlerJudgeVerifier   (judge model from node contract or --judge-model)
     → HandlerReportPoster    (post summary verdict comment)
   |
   v

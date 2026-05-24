@@ -1,5 +1,5 @@
 ---
-description: Multi-model adversarial code review (Gemini, Codex, Qwen3-Coder, DeepSeek-R1, Claude) with weighted-union finding aggregation and iterative convergence. Cannot rubber-stamp. Use --static for static-analysis-only mode (dead code, missing error handling, stubs, Kafka wiring, schema mismatches, hardcoded values, missing tests).
+description: Multi-model adversarial code review with weighted-union finding aggregation and iterative convergence. Cannot rubber-stamp. Use --static for static-analysis-only mode (dead code, missing error handling, stubs, Kafka wiring, schema mismatches, hardcoded values, missing tests).
 mode: full
 version: 6.0.0
 level: intermediate
@@ -35,7 +35,7 @@ args:
     description: Linear ticket ID for loading TCB constraints
     required: false
   - name: models
-    description: "Comma-separated model list (default codex,deepseek-r1)."
+    description: "Comma-separated model list. Defaults to the node contract's configured models when omitted."
     required: false
   - name: passes
     description: "Fixed number of passes to run. Default: iterates until 2 consecutive clean passes."
@@ -84,7 +84,7 @@ args:
 ## What this skill does
 
 Dispatches through `onex run-node node_hostile_reviewer`. The node owns multi-model
-review dispatch (Codex, DeepSeek-R1, Qwen3-Coder), finding aggregation, convergence
+review dispatch, finding aggregation, convergence
 loop, and artifact persistence. This shim contains no inline review logic.
 
 **Announce at start:** "I'm using the hostile-reviewer skill."
@@ -96,7 +96,7 @@ loop, and artifact persistence. This shim contains no inline review logic.
 uv run onex run-node node_hostile_reviewer --input '{
   "pr": <pr_number>,
   "repo": "<owner/repo>",
-  "models": ["codex", "deepseek-r1"],
+  "models": null,
   "passes": null,
   "gate": false,
   "gate_only": false,
@@ -108,7 +108,7 @@ uv run onex run-node node_hostile_reviewer --input '{
 ```bash
 uv run onex run-node node_hostile_reviewer --input '{
   "file": "<path>",
-  "models": ["codex", "deepseek-r1"],
+  "models": null,
   "passes": null
 }' 2>/dev/null
 ```
