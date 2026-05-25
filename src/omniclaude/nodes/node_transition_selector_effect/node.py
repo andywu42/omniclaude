@@ -455,11 +455,10 @@ class NodeTransitionSelectorEffect(NodeEffect):
             ValueError: If model returns no choices.
         """
         endpoint = _resolve_endpoint().rstrip("/")
-        model_id = _resolve_model_id()
         url = f"{endpoint}/v1/chat/completions"
 
         payload = {
-            "model": model_id,
+            "model": _resolve_model_id(),
             "messages": [
                 {
                     "role": "user",
