@@ -1,5 +1,5 @@
 ---
-description: Dispatch-only wrapper for Linear ticket triage node
+description: Dispatch-only wrapper around the Linear ticket triage node
 mode: full
 version: 2.0.0
 level: intermediate
@@ -75,6 +75,12 @@ The `TriageReport` is written to `$ONEX_STATE_DIR/state/ticketing-triage/{run_id
 by the backing node and the path is returned as output.
 
 The `orphaned_tickets` list from the TriageReport is the input to `ticketing-epic-org`.
+
+## Enumeration completeness
+
+OMN-10543 regression guard: the backing node MUST enumerate **every** orphan in
+`orphaned_tickets`; it must not cap, sample, truncate, or emit a "top N" subset.
+Before publishing the report, `orphaned_tickets` list length MUST equal `summary.orphaned_tickets`.
 
 ## See Also
 
