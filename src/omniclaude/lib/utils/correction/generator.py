@@ -389,9 +389,8 @@ class CorrectionGenerator:
         Note: Intelligence client uses httpx.AsyncClient internally.
         In Phase 2, we'll add proper cleanup for the RAG client.
         """
-        # Currently, Intelligence client creates clients per-request
-        # No cleanup needed in Phase 1
-        pass
+        # Currently, Intelligence client creates clients per request.
+        return None
 
 
 # Example usage and testing
